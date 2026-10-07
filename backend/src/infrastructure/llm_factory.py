@@ -14,7 +14,7 @@ class LLMFactory(ILLMFactory):
         api_key = Settings.AI_API_KEY
         model = model_name or Settings.AI_MODEL
 
-        if not api_key:
+        if not api_key and provider != "ollama":
             logger.error(f"AI_API_KEY is missing for provider: {provider}")
             raise ValueError(f"AI_API_KEY is not set for AI_PROVIDER={provider}")
 
@@ -59,6 +59,15 @@ class LLMFactory(ILLMFactory):
         elif provider == "anthropic":
             from langchain_anthropic import ChatAnthropic
             return ChatAnthropic(model=model or "claude-3-5-sonnet-20241022", api_key=api_key, **kwargs)
+
+        elif provider == "ollama":
+            try:
+                # Older langchain versions use langchain_community
+                from langchain_community.chat_models import ChatOllama
+            except ImportError:
+                # Newer versions use langchain_ollama
+                from langchain_ollama import ChatOllama
+            return ChatOllama(model=model or "phi3:mini", **kwargs)
 
         else:
             logger.error(f"Unsupported AI provider: {provider}")

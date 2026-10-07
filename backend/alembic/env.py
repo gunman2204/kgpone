@@ -28,9 +28,11 @@ from src.models.chat_model import Conversation, Message, UserMemory
 # access to the values within the .ini file in use.
 config = context.config
 
+from src.config.settings import Settings
+
 # Dynamically set sqlalchemy.url using our environment variable
 # We replace % with %% because Alembic uses ConfigParser which treats % as interpolation
-db_url = os.environ["DATABASE_URL"].replace("%", "%%")
+db_url = Settings.DATABASE_URL.replace("%", "%%")
 config.set_main_option("sqlalchemy.url", db_url)
 
 # Interpret the config file for Python logging.

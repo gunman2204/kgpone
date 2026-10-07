@@ -8,7 +8,10 @@ class DocumentRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def get_document(self, document_id: UUID) -> Document | None:
+    def get_document(self, document_id: UUID | str) -> Document | None:
+        import uuid
+        if isinstance(document_id, str):
+            document_id = uuid.UUID(document_id)
         return self.session.get(Document, document_id)
 
     def get_documents_by_offering(self, offering_id: UUID) -> list[Document]:

@@ -15,7 +15,7 @@ def main():
     reranker_args = EngineArgs(
         model_name_or_path=os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"),
         engine="torch",
-        device="cuda",
+        device="auto",
         bettertransformer=False
     )
     
@@ -23,7 +23,7 @@ def main():
     embedding_args = EngineArgs(
         model_name_or_path=os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"),
         engine="torch",
-        device="cuda",
+        device="auto",
         bettertransformer=False
     )
     

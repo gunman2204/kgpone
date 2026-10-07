@@ -68,20 +68,46 @@ const Documents = () => {
     }
   }, [selectedCourseId]);
 
-  // Fetch documents when a course offering is fully selected
   useEffect(() => {
+    let timeoutId;
+    let isMounted = true;
+
+    const poll = async () => {
+      if (!selectedOfferingId || !isMounted) return;
+      
+      try {
+        const res = await api.get(`/api/v1/documents/offering/${selectedOfferingId}`);
+        if (!isMounted) return;
+        
+        const docs = res.data.data || [];
+        setDocuments(docs);
+        
+        const needsPolling = docs.some(doc => 
+          !doc.status || doc.status.toUpperCase() === 'PROCESSING' || doc.status.toUpperCase() === 'PENDING'
+        );
+        
+        if (needsPolling) {
+          timeoutId = setTimeout(poll, 3000);
+        }
+      } catch (err) {
+        console.error("Failed to load documents", err);
+        if (isMounted) setDocuments([]);
+      }
+    };
+
     if (selectedOfferingId) {
       setLoading(true);
-      api.get(`/api/v1/documents/offering/${selectedOfferingId}`)
-        .then(res => setDocuments(res.data.data || []))
-        .catch(err => {
-          console.error("Failed to load documents", err);
-          setDocuments([]);
-        })
-        .finally(() => setLoading(false));
+      poll().finally(() => {
+        if (isMounted) setLoading(false);
+      });
     } else {
       setDocuments([]);
     }
+
+    return () => {
+      isMounted = false;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
   }, [selectedOfferingId]);
 
   const handleDelete = async (docId, e) => {

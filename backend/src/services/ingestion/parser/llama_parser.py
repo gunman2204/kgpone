@@ -33,13 +33,14 @@ class LlamaParserImpl(BaseParser):
         document_id: Optional[str] = None,
         s3_storage=None,
     ):
+        from src.config.settings import Settings
         self.api_key = api_key or os.environ.get("LLAMA_CLOUD_API_KEY")
         self.document_id = document_id
         self.s3_storage = s3_storage
-        self.use_fallback = not bool(self.api_key)
+        self.use_fallback = not bool(self.api_key) or Settings.OFFLINE_MODE
         if self.use_fallback:
             logger.warning(
-                "LLAMA_CLOUD_API_KEY not set — falling back to pypdf local parsing."
+                "Offline Mode or API Key missing — falling back to pypdf local parsing."
             )
 
     # ------------------------------------------------------------------

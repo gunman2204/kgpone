@@ -29,9 +29,12 @@ def run_document_ingestion(document_id: str, old_version: int = None):
     logger.info(f"Starting ingestion process for document {document_id}")
     db: Session = SessionLocal()
     try:
+        import uuid
         # 1. Fetch document metadata
         repo = DocumentRepository(db)
-        doc = repo.get_document(document_id)
+        # Ensure we pass a UUID object, not a string, as SQLite's SQLAlchemy dialect expects an object to call .hex on
+        doc_uuid = uuid.UUID(document_id) if isinstance(document_id, str) else document_id
+        doc = repo.get_document(doc_uuid)
         if not doc:
             logger.error(f"Document {document_id} not found in DB.")
             return
@@ -39,18 +42,25 @@ def run_document_ingestion(document_id: str, old_version: int = None):
         # Update status to processing
         repo.update_status(doc.id, ProcessingStatus.PROCESSING, None)
         
-        # We assume doc.s3_key holds the S3 object key (from Presigned URL response)
+        # We assume doc.s3_key holds the S3 object key or a local file path
         file_key = doc.s3_key 
         
-        # 2. Download from S3 to a temporary file
-        s3_storage = S3Storage()
+        # 2. Prepare file path (Download from S3 if cloud, use directly if local dropzone)
         ext = os.path.splitext(file_key)[1] or ".pdf"
+        is_local_file = os.path.isabs(file_key) and os.path.exists(file_key)
+        s3_storage = None  # Will only be assigned in cloud mode
         
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-            temp_path = tmp.name
-        
-        logger.info(f"Downloading {file_key} to {temp_path}")
-        s3_storage.download_file(file_key, temp_path)
+        if is_local_file:
+            logger.info(f"Offline Mode: Using local file directly from {file_key}")
+            temp_path = file_path = file_key
+        else:
+            s3_storage = S3Storage()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                temp_path = tmp.name
+            
+            logger.info(f"Cloud Mode: Downloading {file_key} from S3 to {temp_path}")
+            s3_storage.download_file(file_key, temp_path)
+            file_path = temp_path
         
         # 3. Setup the pipeline
         from src.services.ingestion.parser.llama_parser import LlamaParserImpl
@@ -64,7 +74,7 @@ def run_document_ingestion(document_id: str, old_version: int = None):
         doc_id = str(doc.id)
         parser = LlamaParserImpl(
             document_id=doc_id,
-            s3_storage=s3_storage,
+            s3_storage=s3_storage if not is_local_file else None,
         )
         chunker = DOMChunker()
         embedder = LLMEmbedder()
@@ -135,7 +145,7 @@ def run_document_ingestion(document_id: str, old_version: int = None):
                 ))
         
         # 5. Cleanup temp file
-        if os.path.exists(temp_path):
+        if not is_local_file and os.path.exists(temp_path):
             os.remove(temp_path)
             
         # 6. Update document status

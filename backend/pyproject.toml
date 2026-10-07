@@ -45,6 +45,8 @@ dependencies = [
     "torch>=2.2.0",
     "sentence-transformers>=3.0.0",
     "en-core-web-sm",
+    "watchdog>=6.0.0",
+    "aiosqlite>=0.22.1",
 ]
 
 [tool.pyright]

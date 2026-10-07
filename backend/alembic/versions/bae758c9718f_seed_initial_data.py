@@ -70,7 +70,7 @@ def upgrade() -> None:
         {
             'id': admin_id,
             'email': 'admin@kgpone.edu',
-            'hashed_password': 'hashed_admin_password_placeholder',
+            'hashed_password': '$argon2id$v=19$m=65536,t=3,p=4$QMsnBworcw/lopPRoYhOzw$H4Le0F4d1YSdtHNH+WIGrbKqC9N/wCgbkYA2O+EtUHA',
             'full_name': 'System Admin',
             'role': 'ADMIN',
             'is_active': True,

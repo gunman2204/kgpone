@@ -5,8 +5,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Settings:
+    # Offline Mode Toggle
+    OFFLINE_MODE = os.getenv("OFFLINE_MODE", "False").lower() == "true"
+
     # Database Settings
-    DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/kgpone")
+    _default_db = "sqlite:///./kgpone_offline.db" if OFFLINE_MODE else "postgresql://user:password@localhost:5432/kgpone"
+    DATABASE_URL = _default_db if OFFLINE_MODE else os.getenv("DATABASE_URL", _default_db)
 
     # Qdrant Settings
     QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
@@ -26,15 +30,25 @@ class Settings:
     EXTERNAL_S3_ENDPOINT_URL = os.getenv("EXTERNAL_S3_ENDPOINT_URL", "")
 
     # Celery / Redis Settings
-    CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
-    CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+    if OFFLINE_MODE:
+        CELERY_BROKER_URL = "sqla+sqlite:///./celery_offline.sqlite"
+        CELERY_RESULT_BACKEND = "db+sqlite:///./celery_offline.sqlite"
+    else:
+        CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+        CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
 
     # AI Providers Configuration
-    AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").lower()
-    AI_MODEL = os.getenv("AI_MODEL", "")
+    if OFFLINE_MODE:
+        AI_PROVIDER = "ollama"
+        AI_MODEL = "phi3:mini"
+        EMBEDDING_PROVIDER = "infinity"
+    else:
+        AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").lower()
+        AI_MODEL = os.getenv("AI_MODEL", "")
+        EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "gemini").lower()
+        
     AI_API_KEY = os.getenv("AI_API_KEY", "")
     
-    EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "gemini").lower()
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "")
     EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "384"))
     EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
