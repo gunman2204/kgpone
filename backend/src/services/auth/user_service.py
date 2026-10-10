@@ -97,9 +97,15 @@ class UserService:
         )
         
         refresh_token = self.create_refresh_token(subject=str(user.id))
+        
+        # Create a 30-day offline token for desktop-app mode fallback
+        offline_token = self.create_access_token(
+            subject=str(user.id), expires_delta=timedelta(days=30)
+        )
 
         return TokenResponse(
             access_token=access_token,
             refresh_token=refresh_token,
+            offline_token=offline_token,
             token_type="bearer"
         )

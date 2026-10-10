@@ -84,6 +84,9 @@ class DocumentService:
     def get_documents_for_offering(self, offering_id: UUID) -> list[Document]:
         return self.repository.get_documents_by_offering(offering_id)
 
+    def get_local_documents(self) -> list[Document]:
+        return self.repository.get_local_documents()
+
     def update_document(self, document_id: UUID, doc_update: DocumentUpdate) -> Document:
         doc = self.get_document(document_id)
         return self.repository.update_document(doc, doc_update)

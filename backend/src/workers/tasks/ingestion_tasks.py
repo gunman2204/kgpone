@@ -97,61 +97,68 @@ def run_document_ingestion(document_id: str, old_version: int = None):
             graph_builder=graph_builder
         )
         
-        # Build flattened metadata payload using the builder
+        # Build metadata
         metadata_base = MetadataBuilder.build(doc)
-        
-        # Build dynamic course-aware parsing instructions
-        course = doc.course_offering.course
-        dynamic_instructions = (
-            f"This document is titled '{doc.title}' and is classified as '{doc.doc_type}'. "
-            f"It belongs to the university course '{course.code}: {course.title}' "
-            f"offered in {doc.course_offering.semester.value} {doc.course_offering.year}. "
-            "Use this specific course context to accurately extract and preserve domain-specific acronyms, "
-            "formulas, variables, and technical tables."
-        )
+
+        # Build dynamic parsing instructions (graceful for local/LOC101 files)
+        try:
+            course = doc.course_offering.course
+            dynamic_instructions = (
+                f"This document is titled '{doc.title}' and is classified as '{doc.doc_type}'. "
+                f"It belongs to the university course '{course.code}: {course.title}' "
+                f"offered in {doc.course_offering.semester.value} {doc.course_offering.year}. "
+                "Use this specific course context to accurately extract and preserve domain-specific acronyms, "
+                "formulas, variables, and technical tables."
+            )
+        except Exception:
+            # Fallback for local dropzone files with no real course context
+            dynamic_instructions = (
+                f"This document is titled '{doc.title}'. "
+                "Extract all text, equations, tables, and structural elements accurately."
+            )
         if doc.parsing_instructions:
             dynamic_instructions += f"\n\nAdditional Uploader Instructions:\n{doc.parsing_instructions}"
-        
-        # 4. Execute pipeline asynchronously
+
+        # 4. Execute pipeline
+        logger.info(f"[Pipeline] Running ingestion pipeline for document {document_id}")
         try:
             asyncio.run(pipeline.process_document(
-                file_path=temp_path, 
+                file_path=temp_path,
                 metadata_base=metadata_base,
                 parsing_instructions=dynamic_instructions
             ))
         except RuntimeError:
-            # Fallback if there is already a running loop in the current thread
+            # Fallback if there's already a running event loop (e.g. in test environments)
             try:
                 loop = asyncio.get_event_loop()
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                
             if loop.is_running():
                 future = asyncio.run_coroutine_threadsafe(
                     pipeline.process_document(
-                        file_path=temp_path, 
+                        file_path=temp_path,
                         metadata_base=metadata_base,
                         parsing_instructions=dynamic_instructions
                     ),
                     loop
                 )
-                future.result()  # Wait for completion
+                future.result()
             else:
                 loop.run_until_complete(pipeline.process_document(
-                    file_path=temp_path, 
+                    file_path=temp_path,
                     metadata_base=metadata_base,
                     parsing_instructions=dynamic_instructions
                 ))
-        
-        # 5. Cleanup temp file
+
+        # 5. Cleanup temp file (only for cloud-downloaded files)
         if not is_local_file and os.path.exists(temp_path):
             os.remove(temp_path)
-            
-        # 6. Update document status
+
+        # 6. Update status to COMPLETED
         doc.status = ProcessingStatus.COMPLETED
         db.commit()
-        logger.info(f"Successfully processed Document: {document_id}")
+        logger.info(f"[Done] Successfully processed Document: {document_id}")
 
     except Exception as e:
         logger.error(f"Failed to process Document {document_id}: {str(e)}")

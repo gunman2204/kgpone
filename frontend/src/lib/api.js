@@ -20,6 +20,20 @@ api.interceptors.response.use(
     const originalRequest = error.config;
     if (error.response?.status === 401 && !originalRequest._retry && originalRequest.url !== '/api/v1/users/login') {
       originalRequest._retry = true;
+      
+      // Offline fallback: if no internet, use the 30-day offline token instead of trying to refresh
+      if (!navigator.onLine) {
+        const offlineToken = localStorage.getItem('offline_access_token');
+        if (offlineToken) {
+          originalRequest.headers.Authorization = `Bearer ${offlineToken}`;
+          return api(originalRequest);
+        } else {
+          // No offline token, cannot proceed
+          window.dispatchEvent(new CustomEvent('offline-auth-expired'));
+          return Promise.reject(error);
+        }
+      }
+
       const refreshToken = localStorage.getItem('refresh_token');
       
       if (refreshToken) {
@@ -42,6 +56,7 @@ api.interceptors.response.use(
           // Refresh token is invalid/expired
           localStorage.removeItem('access_token');
           localStorage.removeItem('refresh_token');
+          localStorage.removeItem('offline_access_token');
           localStorage.removeItem('user');
           window.location.href = '/login';
           return Promise.reject(refreshError);

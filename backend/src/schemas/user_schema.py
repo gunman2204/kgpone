@@ -33,6 +33,7 @@ class TokenRefreshRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
+    offline_token: str | None = None
     token_type: str = "bearer"
 
 class EmailOtpCreate(BaseModel):

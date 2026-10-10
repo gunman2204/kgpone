@@ -21,9 +21,17 @@ from src.api.middleware.security_middleware import SecurityHeadersMiddleware
 from src.api.middleware.request_logger import RequestLoggerMiddleware
 from src.config.settings import Settings
 
+from contextlib import asynccontextmanager
 from src.infrastructure.database import Base, engine
+from src.workers.watcher_manager import watcher_manager
 
-app = FastAPI(title="KgpOne Backend API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    watcher_manager.start()
+    yield
+    watcher_manager.stop()
+
+app = FastAPI(title="KgpOne Backend API", lifespan=lifespan)
 customize_openapi(app)
 
 # Database tables are now managed by Alembic migrations

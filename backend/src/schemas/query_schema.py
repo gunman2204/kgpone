@@ -16,6 +16,7 @@ class QueryRequest(BaseModel):
     conversation_id: Optional[UUID] = None
     course_code: Optional[str] = None
     course_offering_id: Optional[str] = None
+    document_ids: Optional[List[UUID]] = None # Phase 5 Dynamic Scoping
     use_citations: bool = True
     # Controls which pipeline is used: basic = fast NLP, advanced = tool-calling agent, general = direct LLM
     analysis_mode: Literal["basic", "advanced", "general"] = "basic"

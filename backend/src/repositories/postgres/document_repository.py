@@ -18,6 +18,18 @@ class DocumentRepository:
         stmt = select(Document).where(Document.course_offering_id == offering_id)
         return list(self.session.scalars(stmt).all())
 
+    def get_local_documents(self) -> list[Document]:
+        from src.models.academic_model import CourseOffering, Course
+        stmt = (
+            select(Document)
+            .join(CourseOffering)
+            .join(Course)
+            .where(Course.code == "LOC101")
+            .where(Document.is_deleted == False)  # noqa: E712
+            .order_by(Document.created_at.desc())
+        )
+        return list(self.session.scalars(stmt).all())
+
     def create_document(self, doc_in: DocumentCreate) -> Document:
         doc = Document(
             course_offering_id=doc_in.course_offering_id,

@@ -36,6 +36,7 @@ class Document(Base):
     
     s3_key: Mapped[str] = mapped_column(Text, nullable=False)
     file_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    file_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True) # Phase 4 Deduplication (SHA-256)
     
     status: Mapped[ProcessingStatus] = mapped_column(Enum(ProcessingStatus), default=ProcessingStatus.PENDING)
     qdrant_collection_id: Mapped[str | None] = mapped_column(String(255), nullable=True)

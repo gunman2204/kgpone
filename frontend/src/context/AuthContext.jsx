@@ -28,6 +28,9 @@ export const AuthProvider = ({ children }) => {
         if (response.data.data.refresh_token) {
           localStorage.setItem('refresh_token', response.data.data.refresh_token);
         }
+        if (response.data.data.offline_token) {
+          localStorage.setItem('offline_access_token', response.data.data.offline_token);
+        }
         
         // Fetch user details
         const meResponse = await api.get('/api/v1/users/me');
@@ -65,6 +68,7 @@ export const AuthProvider = ({ children }) => {
   const logout = () => {
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
+    localStorage.removeItem('offline_access_token');
     localStorage.removeItem('user');
     setUser(null);
     window.location.href = '/login';

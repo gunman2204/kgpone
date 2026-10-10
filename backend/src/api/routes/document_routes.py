@@ -33,6 +33,17 @@ def list_documents_for_offering(offering_id: UUID, service: DocumentService = De
     data = service.get_documents_for_offering(offering_id)
     return StandardResponse(status="success", message="Documents retrieved successfully", data=data)
 
+@router.get("/watcher-health", response_model=StandardResponse[dict])
+def watcher_health():
+    from src.workers.watcher_manager import watcher_manager
+    data = watcher_manager.health()
+    return StandardResponse(status="success", message="Watcher health retrieved", data=data)
+
+@router.get("/local", response_model=StandardResponse[list[DocumentRead]])
+def get_local_documents(service: DocumentService = Depends(get_document_service), user: User = Depends(get_current_user)):
+    data = service.get_local_documents()
+    return StandardResponse(status="success", message="Local documents retrieved successfully", data=data)
+
 @router.get("/{document_id}", response_model=StandardResponse[DocumentRead])
 def get_document(document_id: UUID, service: DocumentService = Depends(get_document_service), user: User = Depends(get_current_user)):
     data = service.get_document(document_id)

@@ -35,7 +35,12 @@ class QdrantRepository(IVectorRepo):
                 if filters:
                     match = True
                     for k, v in filters.items():
-                        if point["payload"].get(k) != v:
+                        if isinstance(v, list):
+                            str_v = [str(x) for x in v]
+                            if str(point["payload"].get(k)) not in str_v:
+                                match = False
+                                break
+                        elif point["payload"].get(k) != v:
                             match = False
                             break
                     if not match:
@@ -64,10 +69,16 @@ class QdrantRepository(IVectorRepo):
 
         query_filter = None
         if filters:
-            conditions = [
-                FieldCondition(key=k, match=MatchValue(value=v))
-                for k, v in filters.items()
-            ]
+            from qdrant_client.models import MatchAny
+            conditions = []
+            for k, v in filters.items():
+                if isinstance(v, list):
+                    # For Qdrant >= 1.9, use MatchAny to filter by a list of values
+                    # If UUIDs, they should be stringified first
+                    str_v = [str(x) for x in v]
+                    conditions.append(FieldCondition(key=k, match=MatchAny(any=str_v)))
+                else:
+                    conditions.append(FieldCondition(key=k, match=MatchValue(value=v)))
             query_filter = Filter(must=conditions)
             
         return self.client.query_points(

@@ -17,3 +17,9 @@ data/
 
 # Local run outputs
 llamaparse_output.md
+
+# Local Offline Data
+kgpone_offline.db
+kgpone_offline.db-journal
+qdrant_local_data/
+

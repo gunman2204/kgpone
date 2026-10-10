@@ -85,7 +85,7 @@ async def ask_question(req: QueryRequest, services: dict = Depends(get_rag_servi
     plan = await services["planner"].detect_intent(query, course_code, course_offering_id)
     
     # 2. Retrieve
-    context = await services["retriever"].retrieve_context(query, plan)
+    context = await services["retriever"].retrieve_context(query, plan, document_ids=req.document_ids)
 
     # 2b. Inject presigned image URLs into ALL figure chunks now so the answer
     #     service context builder can pass live URLs to the LLM.
@@ -257,7 +257,7 @@ async def ask_question_stream(
     # Agent pre-fetched chunks (only present in advanced mode)
     agent_chunks = getattr(plan, "_agent_chunks", [])
 
-    context = await services["retriever"].retrieve_context(query, plan)
+    context = await services["retriever"].retrieve_context(query, plan, document_ids=req.document_ids)
     t2 = time.time()
     logger.info(f"[PERF] Retriever took: {t2 - t1:.4f}s")
 
@@ -404,7 +404,7 @@ async def semantic_search(req: QueryRequest, services: dict = Depends(get_rag_se
     # Force semantic search
     plan.backends_needed = ["qdrant"]
     
-    context = await services["retriever"].retrieve_context(query, plan)
+    context = await services["retriever"].retrieve_context(query, plan, document_ids=req.document_ids)
     reranked_chunks = await services["reranker"].rerank_chunks(query, context["retrieved_chunks"], top_n=10)
     
     results = []

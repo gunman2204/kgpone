@@ -34,7 +34,7 @@ class RetrievalService(BaseRetriever):
         self.collection_name = collection_name
         self.graph_repo = Neo4jRepo()
 
-    async def retrieve_context(self, query: str, plan: QueryPlan) -> dict[str, Any]:
+    async def retrieve_context(self, query: str, plan: QueryPlan, document_ids: list[str] | None = None) -> dict[str, Any]:
         """
         Coordinates hybrid vector + graph retrieval based on QueryPlan.
         Uses asyncio.gather() for parallel execution and RRF for fusion.
@@ -46,7 +46,7 @@ class RetrievalService(BaseRetriever):
         task_labels = []
 
         if "qdrant" in plan.backends_needed:
-            tasks.append(self._retrieve_vector(query, plan))
+            tasks.append(self._retrieve_vector(query, plan, document_ids))
             task_labels.append("qdrant")
 
         if "neo4j" in plan.backends_needed:
@@ -88,7 +88,7 @@ class RetrievalService(BaseRetriever):
             "has_missing_prerequisites": plan.intent == "prerequisites",
         }
 
-    async def _retrieve_vector(self, query: str, plan: QueryPlan) -> List[Dict[str, Any]]:
+    async def _retrieve_vector(self, query: str, plan: QueryPlan, document_ids: list[str] | None = None) -> List[Dict[str, Any]]:
         """Qdrant vector search — fetches top candidates and formats DOM metadata."""
         chunks = []
         try:
@@ -101,6 +101,8 @@ class RetrievalService(BaseRetriever):
                 filters["course_code"] = plan.course_code
             if getattr(plan, "course_offering_id", None):
                 filters["course_offering_id"] = plan.course_offering_id
+            if document_ids:
+                filters["document_id"] = document_ids # Qdrant supports matching against lists
 
             # For figure searches fetch more candidates so we don't miss image chunks
             is_figure_query = plan.intent == "figure_search"

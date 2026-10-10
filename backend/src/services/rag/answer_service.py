@@ -320,9 +320,12 @@ If they ask for code, provide it. Use markdown formatting beautifully."""),
         """
         answer_parts = []
         
+        # Convert Pydantic models to dicts if needed
+        safe_citations = [c.model_dump() if hasattr(c, "model_dump") else c for c in citations]
+        
         # Check if there is prerequisite content
-        prereq_citations = [c for c in citations if c.get("is_prerequisite")]
-        active_citations = [c for c in citations if not c.get("is_prerequisite")]
+        prereq_citations = [c for c in safe_citations if c.get("is_prerequisite")]
+        active_citations = [c for c in safe_citations if not c.get("is_prerequisite")]
 
         if prereq_citations:
             p_cit = prereq_citations[0]
