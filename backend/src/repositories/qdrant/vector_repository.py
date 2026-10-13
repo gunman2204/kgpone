@@ -2,7 +2,7 @@ import uuid
 import logging
 import asyncio
 from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType
-from src.infrastructure.qdrant import get_qdrant_client
+from src.infrastructure.qdrant import get_qdrant_client, get_local_qdrant_client
 from src.utils.interfaces import IVectorRepo
 
 from src.config.settings import Settings
@@ -13,8 +13,9 @@ class QdrantRepository(IVectorRepo):
     # In-memory storage fallback for offline mode
     _fallback_storage: list[dict] = []
 
-    def __init__(self, vector_size: int = None):
-        self.client = get_qdrant_client()
+    def __init__(self, vector_size: int = None, is_local: bool = False):
+        self.is_local = is_local
+        self.client = get_local_qdrant_client() if is_local else get_qdrant_client()
         self.vector_size = vector_size or Settings.EMBEDDING_DIMENSION
         self.use_fallback = False
         if self.client is None:
@@ -73,12 +74,24 @@ class QdrantRepository(IVectorRepo):
             conditions = []
             for k, v in filters.items():
                 if isinstance(v, list):
-                    # For Qdrant >= 1.9, use MatchAny to filter by a list of values
-                    # If UUIDs, they should be stringified first
-                    str_v = [str(x) for x in v]
-                    conditions.append(FieldCondition(key=k, match=MatchAny(any=str_v)))
+                    expanded = []
+                    for item in v:
+                        s = str(item)
+                        expanded.append(s)
+                        try:
+                            u = uuid.UUID(s)
+                            expanded.append(str(u))
+                            expanded.append(u.hex)
+                        except Exception:
+                            pass
+                    conditions.append(FieldCondition(key=k, match=MatchAny(any=list(set(expanded)))))
                 else:
-                    conditions.append(FieldCondition(key=k, match=MatchValue(value=v)))
+                    s = str(v)
+                    try:
+                        u = uuid.UUID(s)
+                        conditions.append(FieldCondition(key=k, match=MatchAny(any=[str(u), u.hex])))
+                    except Exception:
+                        conditions.append(FieldCondition(key=k, match=MatchValue(value=v)))
             query_filter = Filter(must=conditions)
             
         return self.client.query_points(

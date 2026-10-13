@@ -8,7 +8,8 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Bot, User, Send, Network, Database, Sparkles, BookOpen, Download,
   Filter, ChevronLeft, ImageIcon, Sigma, Table2, FileText,
-  Zap, Brain, Key, ChevronDown, Eye, EyeOff, Lock, MessageSquare, Plus, Share2, Settings as SettingsIcon, Trash2, Loader2, CheckCircle2, AlertCircle, WifiOff
+  Zap, Brain, Key, ChevronDown, Eye, EyeOff, Lock, MessageSquare, Plus, Share2, Settings as SettingsIcon, Trash2, Loader2, CheckCircle2, AlertCircle, WifiOff,
+  Activity, RefreshCw, FolderOpen, HardDrive, CheckCircle, XCircle
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import api from '../lib/api';
@@ -448,20 +449,57 @@ const Chat = () => {
   const [memories, setMemories] = useState([]);
   const [memoriesLoading, setMemoriesLoading] = useState(false);
   const [memoriesOpen, setMemoriesOpen] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [systemDiagnostics, setSystemDiagnostics] = useState(null);
+  const [isDiagnosticsLoading, setIsDiagnosticsLoading] = useState(false);
 
   // Offline Mode State
   const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const [isOfflineModeActive, setIsOfflineModeActive] = useState(!navigator.onLine);
+  const [isOfflineModeActive, setIsOfflineModeActive] = useState(() => {
+    return !navigator.onLine || localStorage.getItem('kgpone_offline_mode') === 'true';
+  });
   const [localDocuments, setLocalDocuments] = useState([]);
   const [selectedLocalDocIds, setSelectedLocalDocIds] = useState([]);
   const [watcherHealth, setWatcherHealth] = useState(null);
 
+  const setOfflineMode = (active) => {
+    setIsOfflineModeActive(active);
+    if (active) {
+      localStorage.setItem('kgpone_offline_mode', 'true');
+    } else {
+      localStorage.removeItem('kgpone_offline_mode');
+    }
+  };
+
+  const fetchDiagnostics = useCallback(async () => {
+    setIsDiagnosticsLoading(true);
+    try {
+      const res = await api.get('/api/v1/system/diagnostics');
+      setSystemDiagnostics(res.data?.data || null);
+    } catch (err) {
+      console.error("Failed to fetch diagnostics", err);
+    } finally {
+      setIsDiagnosticsLoading(false);
+    }
+  }, []);
+
+  const openDiagnosticsModal = () => {
+    setDiagnosticsOpen(true);
+    fetchDiagnostics();
+  };
+
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
-      setIsOfflineModeActive(false);
+      // Don't forcefully deactivate if user deliberately set offline mode
+      if (localStorage.getItem('kgpone_offline_mode') !== 'true') {
+        setIsOfflineModeActive(false);
+      }
     };
-    const handleOffline = () => setIsOnline(false);
+    const handleOffline = () => {
+      setIsOnline(false);
+      setOfflineMode(true);
+    };
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
@@ -472,31 +510,24 @@ const Chat = () => {
     };
   }, []);
 
+  const fetchLocal = useCallback(() => {
+    api.get('/api/v1/documents/local')
+      .then(res => setLocalDocuments(res.data.data || []))
+      .catch(err => console.error("Failed to fetch local documents", err));
+      
+    api.get('/api/v1/documents/watcher-health')
+      .then(res => setWatcherHealth(res.data.data))
+      .catch(err => console.error("Failed to fetch watcher health", err));
+  }, []);
+
   useEffect(() => {
     if (!isOfflineModeActive) return;
 
-    const fetchLocal = () => {
-      api.get('/api/v1/documents/local')
-        .then(res => setLocalDocuments(res.data.data || []))
-        .catch(err => console.error("Failed to fetch local documents", err));
-        
-      api.get('/api/v1/documents/watcher-health')
-        .then(res => setWatcherHealth(res.data.data))
-        .catch(err => console.error("Failed to fetch watcher health", err));
-    };
-
     fetchLocal(); // Immediate fetch on mode switch
 
-    // Auto-poll every 6s when files are still processing
-    const hasPending = localDocuments.some(d => d.status === 'PENDING' || d.status === 'PROCESSING');
-    if (!hasPending && localDocuments.length > 0) return; // No need to poll if all ready
-
-    const interval = setInterval(fetchLocal, 6000);
+    const interval = setInterval(fetchLocal, 5000);
     return () => clearInterval(interval);
-  }, [isOfflineModeActive, localDocuments.length,
-      // Re-run when any doc transitions from pending to completed
-      localDocuments.filter(d => d.status !== 'COMPLETED').length
-     ]);
+  }, [isOfflineModeActive, fetchLocal]);
 
   const toggleLocalDoc = (id) => {
     setSelectedLocalDocIds(prev => 
@@ -690,11 +721,12 @@ const Chat = () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(isOfflineModeActive ? { 'X-Offline-Mode': 'true' } : {}),
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
           query: userMessage,
-          course_code: courseCode || null,
+          course_code: courseCode || (isOfflineModeActive ? 'local' : null),
           course_offering_id: selectedOfferingId || null,
           use_citations: useCitations,
           analysis_mode: analysisMode,
@@ -729,7 +761,19 @@ const Chat = () => {
           if (!line.startsWith('data: ')) continue;
           try {
             const data = JSON.parse(line.substring(6));
-            if (data.type === 'chunk') {
+            if (data.type === 'status') {
+              // Update status message with live server progress
+              setMessages(prev => {
+                const next = [...prev];
+                const msg = next[next.length - 1];
+                if (msg && msg.isThinking) {
+                  msg.content = data.content || (data.stage === 'generating' 
+                    ? (isOfflineModeActive ? 'Synthesizing local response with Phi-3...' : 'Synthesizing answer...') 
+                    : 'Searching notes and vector index...');
+                }
+                return next;
+              });
+            } else if (data.type === 'chunk') {
               assistantContent += data.content;
               setStreamingIdx(assistantIdx);
               setMessages(prev => {
@@ -740,6 +784,16 @@ const Chat = () => {
                   msg.content = ''; // Clear placeholder
                 }
                 msg.content = assistantContent;
+                return next;
+              });
+            } else if (data.type === 'error') {
+              setStreamingIdx(null);
+              setMessages(prev => {
+                const next = [...prev];
+                const msg = next[next.length - 1];
+                msg.isThinking = false;
+                msg.isError = true;
+                msg.content = `⚠️ Pipeline Failure: ${data.content || data.message || 'An error occurred during response generation'}.\n\n*Diagnostics:* Verify that Local Qdrant and Ollama (phi3:mini) are active, or inspect the System Diagnostics panel in the sidebar.`;
                 return next;
               });
             } else if (data.type === 'metadata') {
@@ -763,15 +817,15 @@ const Chat = () => {
     } catch (error) {
       console.error('Chat error:', error);
       toast({
-        title: 'Error',
-        description: error.message || 'Failed to communicate with KnowledgeOS.',
+        title: 'Connection Issue',
+        description: error.message || 'Failed to communicate with KnowledgeOS backend.',
         variant: 'destructive',
       });
       setMessages(prev => {
         const next = [...prev];
         next[next.length - 1] = {
           role: 'assistant',
-          content: "I'm sorry, I encountered an error. Please try again.",
+          content: `⚠️ Communication Failure: ${error.message || 'Failed to connect to backend server'}.\n\n*Troubleshooting Tips:*\n1. Check if the backend is running (` + '`./start_web.sh`' + `)\n2. If offline, ensure **Offline Local Mode** is toggled in the sidebar.\n3. Open **System Diagnostics** (activity icon in the sidebar) to verify subsystems.`,
           isError: true,
         };
         return next;
@@ -822,331 +876,99 @@ const Chat = () => {
     <div className="flex flex-col md:flex-row h-screen w-full bg-slate-50/50 dark:bg-slate-950 p-4 gap-6">
 
       {/* ── Sidebar ──────────────────────────────────────────────────── */}
-      <div className="w-full md:w-72 shrink-0 flex flex-col bg-white/80 dark:bg-slate-900/80 backdrop-blur-md rounded-2xl border shadow-sm p-4 overflow-y-auto no-scrollbar">
-        <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
-          <Button
-            variant="ghost" size="icon"
-            onClick={() => navigate(-1)}
-            className="h-8 w-8 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
-          >
-            <ChevronLeft className="w-5 h-5 text-slate-600 dark:text-slate-300" />
-          </Button>
-          <div className="p-2 bg-gradient-to-br from-primary/20 to-primary/5 rounded-lg text-primary shadow-sm border border-primary/10">
-            <Sparkles className="w-4 h-4" />
-          </div>
-          <div>
-            <h1 className="text-sm font-bold leading-none mb-1 text-slate-800 dark:text-slate-100">KnowledgeOS</h1>
-            <p className="text-[10px] text-slate-500 font-medium uppercase tracking-wider">Academic Tutor</p>
-          </div>
-        </div>
-
-        {/* Network Banner */}
-        {!isOnline && (
-          <div className="mb-4 shrink-0">
-            {isOfflineModeActive ? (
-              <div className="bg-amber-100/50 border border-amber-200 dark:bg-amber-900/20 dark:border-amber-800/50 rounded-xl p-3 flex flex-col gap-2 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-semibold text-amber-700 dark:text-amber-400 flex items-center gap-1.5">
-                    <Zap size={14} /> Offline Mode
-                  </h3>
-                  <button onClick={() => setIsOfflineModeActive(false)} className="text-[10px] text-amber-600 hover:underline">Exit</button>
-                </div>
-                <p className="text-[10px] text-amber-700/80 dark:text-amber-400/80 leading-tight">
-                  You are currently browsing your local library. Online features are disabled.
-                </p>
-              </div>
-            ) : (
-              <div className="bg-red-50 border border-red-100 dark:bg-red-900/20 dark:border-red-900/30 rounded-xl p-3 shadow-sm">
-                <p className="text-[11px] text-red-600 dark:text-red-400 font-medium flex items-center gap-1.5 mb-2">
-                  <Network size={14} /> Connection Lost
-                </p>
-                <Button 
-                  size="sm" 
-                  onClick={() => setIsOfflineModeActive(true)}
-                  className="w-full text-[10px] h-7 bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/40 dark:text-red-300 shadow-none border border-red-200/50 dark:border-red-800/50 transition-all"
-                >
-                  Switch to Offline Mode
-                </Button>
-              </div>
-            )}
-          </div>
-        )}
-
-        <div className={`flex flex-col flex-1 min-h-0 transition-all duration-300 ${isOfflineModeActive ? 'blur-[2px] opacity-40 pointer-events-none select-none' : ''}`}>
-        {/* ── Settings Accordion ─────────────────────────────────────── */}
-        <div className="flex flex-col mb-4 shrink-0">
-          <button
-            onClick={() => setSettingsOpen(o => !o)}
-            className="flex items-center justify-between w-full py-2 group border-b border-slate-100 dark:border-slate-800"
-          >
-            <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-2 group-hover:text-slate-700 dark:group-hover:text-slate-300 transition-colors">
-              <SettingsIcon size={14} className="text-slate-400" /> Chat Settings
-            </h2>
-            <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${settingsOpen ? 'rotate-180' : ''}`} />
-          </button>
-
-          {settingsOpen && (
-            <div className="flex flex-col gap-5 pt-4 animate-in slide-in-from-top-2 fade-in duration-200">
-              {/* Filters */}
-              <div className="flex flex-col gap-3">
-                <Select value={selectedDeptId} onValueChange={(val) => {
-                  setSelectedDeptId(val === 'all' ? '' : val);
-                  setSelectedCourseId('');
-                  setSelectedOfferingId('');
-                }}>
-                  <SelectTrigger className="h-9 text-[12px] rounded-lg bg-slate-50/50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 shadow-sm transition-all focus:ring-2 focus:ring-primary/20">
-                    <SelectValue placeholder="1. Department" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">Any Department</SelectItem>
-                    {departments.map(d => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-
-                <Select value={selectedCourseId} onValueChange={(val) => {
-                  setSelectedCourseId(val === 'all' ? '' : val);
-                  setSelectedOfferingId('');
-                }} disabled={!selectedDeptId}>
-                  <SelectTrigger className="h-9 text-[12px] rounded-lg bg-slate-50/50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 shadow-sm transition-all focus:ring-2 focus:ring-primary/20">
-                    <SelectValue placeholder="2. Course" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">Any Course</SelectItem>
-                    {filteredCourses.map(c => <SelectItem key={c.id} value={c.id}>{c.code}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-
-                <Select
-                  value={selectedOfferingId}
-                  onValueChange={(val) => setSelectedOfferingId(val === 'all' ? '' : val)}
-                  disabled={!selectedCourseId || offerings.length === 0}
-                >
-                  <SelectTrigger className="h-9 text-[12px] rounded-lg bg-slate-50/50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 shadow-sm transition-all focus:ring-2 focus:ring-primary/20">
-                    <SelectValue placeholder={offerings.length === 0 && selectedCourseId ? 'No offerings' : '3. Offering'} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">Any Offering</SelectItem>
-                    {offerings.map(o => <SelectItem key={o.id} value={o.id}>{o.semester} {o.year}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-
-                <div className="pt-1">
-                  <label className="text-[12px] font-medium text-slate-600 dark:text-slate-300 flex items-center cursor-pointer select-none hover:text-slate-900 transition-colors">
-                    <input
-                      type="checkbox"
-                      checked={useCitations}
-                      onChange={(e) => setUseCitations(e.target.checked)}
-                      className="mr-2.5 h-3.5 w-3.5 rounded border-slate-300 text-primary focus:ring-primary transition-all shadow-sm"
-                    />
-                    Enable Inline Citations
-                  </label>
-                </div>
-              </div>
-
-              {/* Analysis Mode Toggle */}
-              <div className="flex flex-col gap-2">
-                <h3 className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Analysis Mode</h3>
-                <div className="flex rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 shadow-sm">
-                  <button
-                    onClick={() => setAnalysisMode('general')}
-                    className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-[11px] font-semibold transition-all duration-200 ${
-                      analysisMode === 'general'
-                        ? 'bg-slate-700 text-white shadow-inner'
-                        : 'bg-slate-50 dark:bg-slate-900 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
-                    }`}
-                  >
-                    <MessageSquare className="w-3 h-3" />
-                    General
-                  </button>
-                  <button
-                    onClick={() => setAnalysisMode('basic')}
-                    className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-[11px] font-semibold transition-all duration-200 ${
-                      analysisMode === 'basic'
-                        ? 'bg-primary text-white shadow-inner'
-                        : 'bg-slate-50 dark:bg-slate-900 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
-                    }`}
-                  >
-                    <Zap className="w-3 h-3" />
-                    Basic
-                  </button>
-                  <button
-                    onClick={() => setAnalysisMode('advanced')}
-                    className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-[11px] font-semibold transition-all duration-200 ${
-                      analysisMode === 'advanced'
-                        ? 'bg-gradient-to-r from-violet-600 to-pink-600 text-white shadow-inner'
-                        : 'bg-slate-50 dark:bg-slate-900 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
-                    }`}
-                  >
-                    <Brain className="w-3 h-3" />
-                    Advanced
-                  </button>
-                </div>
-              </div>
-
-              {/* BYOK Settings */}
-              <div className="flex flex-col gap-2">
-                <button
-                  onClick={() => setByokOpen(o => !o)}
-                  className="flex items-center justify-between w-full group pt-1"
-                >
-                  <h3 className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1.5 group-hover:text-slate-700 dark:group-hover:text-slate-300 transition-colors">
-                    <Key size={12} className="text-slate-400" /> Bring Your Own Key
-                    {byokKey && (
-                      <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded text-[8px] font-bold bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400 ml-1">
-                        <Lock className="w-2 h-2" />
-                      </span>
-                    )}
-                  </h3>
-                  <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${byokOpen ? 'rotate-180' : ''}`} />
-                </button>
-
-                {byokOpen && (
-                  <div className="kgp-byok-open flex flex-col gap-2.5 mt-1 bg-slate-50 dark:bg-slate-900/60 rounded-lg p-2.5 border border-slate-200 dark:border-slate-800">
-                    <div>
-                      <select
-                        value={byokProvider}
-                        onChange={e => { setByokProvider(e.target.value); setByokModel(''); setByokKey(''); }}
-                        className="w-full text-[11px] rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-primary/50"
-                      >
-                        <option value="">Provider (Server Default)</option>
-                        <option value="gemini">Google Gemini</option>
-                        <option value="openai">OpenAI</option>
-                        <option value="groq">Groq</option>
-                        <option value="anthropic">Anthropic (Claude)</option>
-                      </select>
-                    </div>
-                    {byokProvider && (
-                      <div>
-                        <input
-                          type="text"
-                          value={byokModel}
-                          onChange={e => setByokModel(e.target.value)}
-                          placeholder="Model (optional)"
-                          className="w-full text-[11px] rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-primary/50"
-                        />
-                      </div>
-                    )}
-                    {byokProvider && (
-                      <div className="relative">
-                        <input
-                          type={byokKeyVisible ? 'text' : 'password'}
-                          value={byokKey}
-                          onChange={e => setByokKey(e.target.value)}
-                          placeholder="API Key"
-                          className="w-full text-[11px] rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 px-2 py-1.5 pr-8 focus:outline-none focus:ring-1 focus:ring-primary/50 font-mono"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setByokKeyVisible(v => !v)}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
-                        >
-                          {byokKeyVisible ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-                        </button>
-                      </div>
-                    )}
-                    {byokKey && (
-                      <button
-                        type="button"
-                        onClick={() => { setByokKey(''); setByokProvider(''); setByokModel(''); }}
-                        className="text-[10px] text-red-500 hover:text-red-700 text-left font-medium transition-colors"
-                      >
-                        ✕ Clear
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-              
-              {/* Memory Clear */}
-              <div className="pt-4 mt-2 border-t border-slate-100 dark:border-slate-800">
-                <div className="flex flex-col gap-2">
-                  <Button 
-                    variant="outline" 
-                    size="sm" 
-                    className="w-full text-slate-600 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 justify-center text-[11px]"
-                    onClick={() => setMemoriesOpen(true)}
-                  >
-                    <Sparkles className="w-3.5 h-3.5 mr-1.5" />
-                    View AI Memory
-                  </Button>
-                  <Button 
-                    variant="outline" 
-                    size="sm" 
-                    className="w-full text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30 border-red-200 dark:border-red-900/50 justify-center text-[11px]"
-                    onClick={clearMemories}
-                  >
-                    <Trash2 className="w-3.5 h-3.5 mr-1.5" />
-                    Clear AI Memory
-                  </Button>
-                </div>
-                <p className="text-[10px] text-slate-400 mt-2 text-center px-1 leading-tight">
-                  Manage the facts the assistant has learned about you.
-                </p>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* ── Recent Chats ───────────────────────────────────────────── */}
-        <div className="flex flex-col gap-2 flex-1 min-h-0 pt-4">
-          <div className="flex items-center justify-between mb-1">
-            <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-2">
-              <MessageSquare size={14} className="text-slate-400" /> Recent Chats
-            </h2>
+      <div className="w-full md:w-80 shrink-0 flex flex-col bg-white/90 dark:bg-slate-900/90 backdrop-blur-md rounded-2xl border shadow-sm p-4 overflow-hidden h-[calc(100vh-2rem)]">
+        
+        {/* Brand Header */}
+        <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800 shrink-0">
+          <div className="flex items-center gap-2.5">
             <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6 rounded hover:bg-slate-100 dark:hover:bg-slate-800"
-              onClick={createNewChat}
-              title="New Chat"
+              variant="ghost" size="icon"
+              onClick={() => navigate(-1)}
+              className="h-8 w-8 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
             >
-              <Plus className="w-4 h-4 text-slate-500" />
+              <ChevronLeft className="w-4 h-4 text-slate-600 dark:text-slate-300" />
             </Button>
+            <div className="p-2 bg-gradient-to-br from-primary/20 to-primary/5 rounded-lg text-primary shadow-sm border border-primary/10">
+              <Sparkles className="w-4 h-4" />
+            </div>
+            <div>
+              <h1 className="text-sm font-bold leading-none mb-0.5 text-slate-800 dark:text-slate-100">KnowledgeOS</h1>
+              <p className="text-[10px] text-slate-500 font-medium uppercase tracking-wider">Academic AI</p>
+            </div>
           </div>
-          
-          <div className="flex-1 overflow-y-auto no-scrollbar space-y-1 pr-1">
-            {conversations.length === 0 ? (
-              <p className="text-[11px] text-slate-400 py-2 text-center">No recent chats</p>
-            ) : (
-              conversations.map(conv => (
-                <div key={conv.id} className="relative group">
-                  <button
-                    onClick={() => loadConversation(conv.id)}
-                    className={`w-full text-left px-2 py-2 pr-8 text-[12px] rounded-lg transition-all truncate border ${
-                      activeConversationId === conv.id
-                        ? 'bg-primary/10 border-primary/20 text-primary font-medium dark:bg-primary/20 dark:text-primary-foreground'
-                        : 'bg-transparent border-transparent text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
-                    }`}
-                  >
-                    {conv.title || 'Untitled Conversation'}
-                  </button>
-                  <button
-                    onClick={(e) => deleteConversation(conv.id, e)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                    title="Delete Chat"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={openDiagnosticsModal}
+            className="h-7 w-7 rounded-lg text-slate-400 hover:text-primary hover:bg-slate-100 dark:hover:bg-slate-800"
+            title="System Diagnostics & Telemetry"
+          >
+            <Activity className="w-4 h-4" />
+          </Button>
         </div>
 
-        {/* ── Offline Local Documents Panel ────────────────────────────── */}
-        {isOfflineModeActive && (
-          <div className="flex flex-col gap-2 flex-1 min-h-0 pt-4 border-t border-amber-200 dark:border-amber-800/40 animate-in slide-in-from-bottom-4 fade-in duration-300">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xs font-semibold text-amber-700 dark:text-amber-400 uppercase tracking-wider flex items-center gap-2">
-                <WifiOff size={13} /> Local Library
-                {watcherHealth && (
-                  <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${watcherHealth.status === 'running' ? 'bg-emerald-100/80 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-400' : 'bg-red-100/80 text-red-700 dark:bg-red-900/50 dark:text-red-400'}`}>
-                    {watcherHealth.status === 'running' ? 'Watcher: OK' : 'Watcher: Error'}
-                  </span>
-                )}
-              </h2>
-              <div className="flex items-center gap-1">
+        {/* Mode Switcher Segmented Control */}
+        <div className="flex bg-slate-100 dark:bg-slate-800/80 p-1 rounded-xl my-3 shrink-0">
+          <button
+            onClick={() => setOfflineMode(false)}
+            className={`flex-1 py-1.5 text-[11px] font-semibold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+              !isOfflineModeActive
+                ? 'bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 shadow-sm'
+                : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+            }`}
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            Campus Courses
+          </button>
+          <button
+            onClick={() => setOfflineMode(true)}
+            className={`flex-1 py-1.5 text-[11px] font-semibold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+              isOfflineModeActive
+                ? 'bg-amber-500 text-white shadow-sm'
+                : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+            }`}
+          >
+            <Zap className="w-3.5 h-3.5" />
+            Local Dropzone
+          </button>
+        </div>
+
+        {/* ── Mode 1: Offline Local Library ── */}
+        {isOfflineModeActive ? (
+          <div className="flex flex-col flex-1 min-h-0 animate-in fade-in duration-200">
+            {/* Watcher Health Card */}
+            <div className="bg-amber-50/80 dark:bg-amber-950/20 border border-amber-200/80 dark:border-amber-900/40 rounded-xl p-2.5 mb-3 shrink-0">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                  <FolderOpen className="w-3.5 h-3.5" /> Dropzone Active
+                </span>
+                <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
+                  watcherHealth?.status === 'running' 
+                    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-400' 
+                    : 'bg-red-100 text-red-700'
+                }`}>
+                  {watcherHealth?.status === 'running' ? 'Watcher: OK' : 'Watcher: Error'}
+                </span>
+              </div>
+              <p className="text-[10px] text-amber-700/80 dark:text-amber-400/80 mt-1 font-mono truncate">
+                ~/KgpOne_Dropzone
+              </p>
+            </div>
+
+            {/* Document Header & Select All */}
+            <div className="flex items-center justify-between pb-2 mb-1 border-b border-slate-100 dark:border-slate-800 shrink-0">
+              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                <HardDrive className="w-3.5 h-3.5" /> Local Library ({localDocuments.length})
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={fetchLocal}
+                  className="p-1 text-slate-400 hover:text-slate-600 transition-colors"
+                  title="Refresh library"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                </button>
                 {localDocuments.length > 0 && (
                   <button
                     onClick={() => {
@@ -1157,97 +979,240 @@ const Chat = () => {
                         setSelectedLocalDocIds(completed.map(d => d.id));
                       }
                     }}
-                    className="text-[10px] text-amber-600 dark:text-amber-400 hover:underline"
+                    className="text-[10px] text-primary hover:underline font-medium"
                   >
-                    {selectedLocalDocIds.length === localDocuments.filter(d=>d.status==='COMPLETED').length ? 'Deselect All' : 'Select All'}
+                    {selectedLocalDocIds.length === localDocuments.filter(d=>d.status==='COMPLETED').length ? 'Deselect' : 'Select All'}
                   </button>
                 )}
               </div>
             </div>
 
-            {localDocuments.length === 0 ? (
-              <div className="flex flex-col items-center gap-2 py-6 text-center">
-                <WifiOff className="w-8 h-8 text-slate-300" />
-                <p className="text-[11px] text-slate-400 leading-tight">
-                  No local files found.<br />
-                  Drop a PDF into <code className="text-amber-600">~/KgpOne_Dropzone</code>
-                </p>
-              </div>
-            ) : (
-              <div className="flex-1 overflow-y-auto no-scrollbar space-y-1">
-                {localDocuments.map(doc => {
+            {/* Document Cards Scroll Area */}
+            <div className="flex-1 overflow-y-auto min-h-0 space-y-1.5 pr-1 py-1">
+              {localDocuments.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-8 text-center px-2">
+                  <WifiOff className="w-7 h-7 text-slate-300 dark:text-slate-700 mb-2" />
+                  <p className="text-[11px] font-medium text-slate-600 dark:text-slate-400">No local files yet</p>
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    Drop a PDF into <code className="text-amber-600 font-mono">~/KgpOne_Dropzone</code> to automatically index.
+                  </p>
+                </div>
+              ) : (
+                localDocuments.map(doc => {
                   const isCompleted = doc.status === 'COMPLETED';
                   const isPending = doc.status === 'PENDING';
-                  const isFailed = doc.status === 'FAILED';
                   const isProcessing = doc.status === 'PROCESSING';
+                  const isSelected = selectedLocalDocIds.includes(doc.id);
 
                   return (
                     <label
                       key={doc.id}
-                      className={`flex items-start gap-2 p-2 rounded-lg border transition-all ${
+                      className={`flex items-start gap-2.5 p-2 rounded-xl border transition-all ${
                         isCompleted
-                          ? 'hover:bg-amber-50/50 dark:hover:bg-amber-900/10 cursor-pointer border-transparent hover:border-amber-200 dark:hover:border-amber-800/50'
-                          : 'opacity-60 cursor-not-allowed border-transparent'
+                          ? isSelected
+                            ? 'bg-amber-500/10 border-amber-500/30 text-amber-900 dark:text-amber-200 cursor-pointer shadow-xs'
+                            : 'bg-white dark:bg-slate-900/60 border-slate-200/80 dark:border-slate-800 hover:border-amber-300 cursor-pointer'
+                          : 'opacity-60 cursor-not-allowed border-slate-100 bg-slate-50 dark:bg-slate-900/20'
                       }`}
                     >
                       {isCompleted ? (
                         <input
                           type="checkbox"
-                          className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-amber-500 focus:ring-amber-400 transition-all"
-                          checked={selectedLocalDocIds.includes(doc.id)}
+                          className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-amber-500 focus:ring-amber-400 transition-all shrink-0"
+                          checked={isSelected}
                           onChange={() => toggleLocalDoc(doc.id)}
                         />
                       ) : (
-                        <div className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 flex items-center justify-center">
+                        <div className="mt-0.5 h-3.5 w-3.5 shrink-0 flex items-center justify-center">
                           {(isPending || isProcessing) && <Loader2 className="w-3 h-3 text-amber-400 animate-spin" />}
-                          {isFailed && <AlertCircle className="w-3 h-3 text-red-400" />}
                         </div>
                       )}
-                      <div className="flex flex-col overflow-hidden">
-                        <span className="text-[12px] text-slate-700 dark:text-slate-300 font-medium truncate">{doc.title}</span>
-                        <div className="flex items-center gap-1.5 mt-0.5">
-                          <span className="text-[9px] text-slate-400 uppercase">
-                            {doc.format} • {((doc.file_size_bytes || 0) / 1024 / 1024).toFixed(2)} MB
-                          </span>
-                          <span className={`text-[8px] font-semibold uppercase px-1 py-0.5 rounded ${
-                            isCompleted ? 'bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400' :
-                            isProcessing ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400' :
-                            isPending ? 'bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400' :
-                            'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400'
+                      <div className="flex flex-col min-w-0 flex-1">
+                        <span className="text-[11px] font-semibold truncate leading-tight" title={doc.title}>
+                          {doc.title}
+                        </span>
+                        <div className="flex items-center gap-1.5 mt-1 text-[9px] text-slate-400">
+                          <span>{doc.format} • {((doc.file_size_bytes || 0) / 1024 / 1024).toFixed(1)} MB</span>
+                          <span className={`px-1 py-0.2 rounded font-bold uppercase text-[8px] ${
+                            isCompleted ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400' :
+                            isProcessing ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400' :
+                            'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400'
                           }`}>
-                            {isCompleted ? '✓ Ready' : isProcessing ? 'Indexing…' : isPending ? 'Queued' : 'Failed'}
+                            {isCompleted ? '✓ Ready' : isProcessing ? 'Indexing' : 'Queued'}
                           </span>
                         </div>
                       </div>
                     </label>
                   );
-                })}
-              </div>
-            )}
+                })
+              )}
+            </div>
 
-            {selectedLocalDocIds.length > 0 && (
-              <div className="text-[10px] text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-lg px-2 py-1.5 border border-amber-200 dark:border-amber-800/50">
-                <CheckCircle2 className="w-3 h-3 inline mr-1" />
-                {selectedLocalDocIds.length} file(s) selected for offline chat
+            {/* Bottom Local Status Banner */}
+            <div className="pt-2 mt-2 border-t border-slate-100 dark:border-slate-800 shrink-0">
+              <div className="text-[10px] text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 rounded-lg p-2 border border-amber-200/60 dark:border-amber-800/40 flex items-center justify-between">
+                <span className="flex items-center gap-1 font-medium">
+                  <CheckCircle2 className="w-3 h-3" />
+                  {selectedLocalDocIds.length} file(s) active in RAG
+                </span>
+                <button
+                  onClick={createNewChat}
+                  className="text-primary hover:underline font-semibold"
+                >
+                  + New Chat
+                </button>
               </div>
-            )}
+            </div>
+          </div>
+        ) : (
+          /* ── Mode 2: Online Campus Courses ── */
+          <div className="flex flex-col flex-1 min-h-0 animate-in fade-in duration-200">
+            {/* Settings Accordion */}
+            <div className="flex flex-col mb-3 shrink-0">
+              <button
+                onClick={() => setSettingsOpen(o => !o)}
+                className="flex items-center justify-between w-full py-1.5 group border-b border-slate-100 dark:border-slate-800"
+              >
+                <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1.5 group-hover:text-slate-700 dark:group-hover:text-slate-300 transition-colors">
+                  <SettingsIcon size={13} className="text-slate-400" /> Course Settings
+                </h2>
+                <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${settingsOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {settingsOpen && (
+                <div className="flex flex-col gap-3 pt-3 animate-in slide-in-from-top-1 fade-in duration-150">
+                  <Select value={selectedDeptId} onValueChange={(val) => {
+                    setSelectedDeptId(val === 'all' ? '' : val);
+                    setSelectedCourseId('');
+                    setSelectedOfferingId('');
+                  }}>
+                    <SelectTrigger className="h-8 text-[11px] rounded-lg bg-slate-50/50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 shadow-sm">
+                      <SelectValue placeholder="1. Department" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Any Department</SelectItem>
+                      {departments.map(d => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+
+                  <Select value={selectedCourseId} onValueChange={(val) => {
+                    setSelectedCourseId(val === 'all' ? '' : val);
+                    setSelectedOfferingId('');
+                  }} disabled={!selectedDeptId}>
+                    <SelectTrigger className="h-8 text-[11px] rounded-lg bg-slate-50/50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 shadow-sm" disabled={!selectedDeptId}>
+                      <SelectValue placeholder="2. Course" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Any Course</SelectItem>
+                      {filteredCourses.map(c => <SelectItem key={c.id} value={c.id}>{c.code}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+
+                  <div className="pt-0.5">
+                    <label className="text-[11px] font-medium text-slate-600 dark:text-slate-300 flex items-center cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={useCitations}
+                        onChange={(e) => setUseCitations(e.target.checked)}
+                        className="mr-2 h-3 w-3 rounded border-slate-300 text-primary"
+                      />
+                      Enable Inline Citations
+                    </label>
+                  </div>
+
+                  {/* Analysis Mode Toggle */}
+                  <div className="flex rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700 shadow-xs">
+                    <button
+                      onClick={() => setAnalysisMode('general')}
+                      className={`flex-1 py-1.5 text-[10px] font-semibold transition-all ${
+                        analysisMode === 'general' ? 'bg-slate-700 text-white' : 'bg-slate-50 dark:bg-slate-900 text-slate-500'
+                      }`}
+                    >
+                      General
+                    </button>
+                    <button
+                      onClick={() => setAnalysisMode('basic')}
+                      className={`flex-1 py-1.5 text-[10px] font-semibold transition-all ${
+                        analysisMode === 'basic' ? 'bg-primary text-white' : 'bg-slate-50 dark:bg-slate-900 text-slate-500'
+                      }`}
+                    >
+                      Basic
+                    </button>
+                    <button
+                      onClick={() => setAnalysisMode('advanced')}
+                      className={`flex-1 py-1.5 text-[10px] font-semibold transition-all ${
+                        analysisMode === 'advanced' ? 'bg-gradient-to-r from-violet-600 to-pink-600 text-white' : 'bg-slate-50 dark:bg-slate-900 text-slate-500'
+                      }`}
+                    >
+                      Agent
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Recent Chats */}
+            <div className="flex flex-col flex-1 min-h-0 pt-2 border-t border-slate-100 dark:border-slate-800">
+              <div className="flex items-center justify-between mb-1.5 shrink-0">
+                <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                  <MessageSquare size={13} className="text-slate-400" /> Recent Chats
+                </h2>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 rounded hover:bg-slate-100 dark:hover:bg-slate-800"
+                  onClick={createNewChat}
+                  title="New Chat"
+                >
+                  <Plus className="w-3.5 h-3.5 text-slate-500" />
+                </Button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto min-h-0 space-y-1 pr-1">
+                {conversations.length === 0 ? (
+                  <p className="text-[11px] text-slate-400 py-3 text-center">No recent chats</p>
+                ) : (
+                  conversations.map(conv => (
+                    <div key={conv.id} className="relative group">
+                      <button
+                        onClick={() => loadConversation(conv.id)}
+                        className={`w-full text-left px-2 py-1.5 pr-7 text-[11px] rounded-lg transition-all truncate border ${
+                          activeConversationId === conv.id
+                            ? 'bg-primary/10 border-primary/20 text-primary font-medium dark:bg-primary/20'
+                            : 'bg-transparent border-transparent text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        {conv.title || 'Untitled Conversation'}
+                      </button>
+                      <button
+                        onClick={(e) => deleteConversation(conv.id, e)}
+                        className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="Delete Chat"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
           </div>
         )}
 
-        {/* Legend */}
-        <div className="flex flex-col gap-2 pt-4 border-t border-slate-100 dark:border-slate-800">
-          <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Source Types</h2>
-          {Object.entries(CHUNK_TYPE_CONFIG).map(([type, cfg]) => {
-            const Icon = cfg.icon;
-            return (
-              <div key={type} className="flex items-center gap-2">
-                <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-bold ${cfg.color}`}>
-                  <Icon className="w-2.5 h-2.5" /> {cfg.label}
-                </span>
-                <span className="text-[11px] text-slate-500 capitalize">{type.replace('_', ' ')}</span>
-              </div>
-            );
-          })}
+        {/* Footer actions */}
+        <div className="pt-2 mt-auto border-t border-slate-100 dark:border-slate-800 shrink-0 flex items-center justify-between text-[11px]">
+          <button
+            onClick={() => setMemoriesOpen(true)}
+            className="text-slate-500 hover:text-primary flex items-center gap-1 py-1"
+          >
+            <Sparkles className="w-3 h-3" /> Memory
+          </button>
+          <button
+            onClick={openDiagnosticsModal}
+            className="text-slate-500 hover:text-primary flex items-center gap-1 py-1"
+          >
+            <Activity className="w-3 h-3" /> Diagnostics
+          </button>
         </div>
       </div>
 
@@ -1388,6 +1353,129 @@ const Chat = () => {
                   </li>
                 ))}
               </ul>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* System Diagnostics & Telemetry Dialog */}
+      <Dialog open={diagnosticsOpen} onOpenChange={setDiagnosticsOpen}>
+        <DialogContent className="sm:max-w-lg max-h-[85vh] flex flex-col p-0">
+          <DialogHeader className="px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
+            <div className="flex items-center justify-between">
+              <DialogTitle className="flex items-center gap-2 text-primary text-base">
+                <Activity className="w-5 h-5 text-primary" />
+                System Health & Diagnostics
+              </DialogTitle>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={fetchDiagnostics}
+                disabled={isDiagnosticsLoading}
+                className="h-7 text-xs gap-1.5 text-slate-500 hover:text-primary"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isDiagnosticsLoading ? 'animate-spin' : ''}`} />
+                Refresh
+              </Button>
+            </div>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
+            <p className="text-[12px] text-slate-500 leading-relaxed">
+              Live status across hybrid online/offline subsystems. Pinpoints offline fallbacks, connection drops, and service statuses.
+            </p>
+
+            {isDiagnosticsLoading && !systemDiagnostics ? (
+              <div className="space-y-2 py-4">
+                {[1, 2, 3, 4].map(i => (
+                  <div key={i} className="h-12 bg-slate-100 dark:bg-slate-800 animate-pulse rounded-xl" />
+                ))}
+              </div>
+            ) : systemDiagnostics ? (
+              <div className="space-y-2.5">
+                {/* Cloud DB */}
+                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-between bg-white dark:bg-slate-900 shadow-xs">
+                  <div>
+                    <div className="text-[12px] font-semibold text-slate-800 dark:text-slate-200">Cloud PostgreSQL (Neon)</div>
+                    <div className="text-[10px] text-slate-500">{systemDiagnostics.cloud_database?.description}</div>
+                    {systemDiagnostics.cloud_database?.action && (
+                      <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">{systemDiagnostics.cloud_database.action}</div>
+                    )}
+                  </div>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                    systemDiagnostics.cloud_database?.status === 'online' 
+                      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400' 
+                      : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400'
+                  }`}>
+                    {systemDiagnostics.cloud_database?.status}
+                  </span>
+                </div>
+
+                {/* Local DB */}
+                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-between bg-white dark:bg-slate-900 shadow-xs">
+                  <div>
+                    <div className="text-[12px] font-semibold text-slate-800 dark:text-slate-200">Local Database (SQLite)</div>
+                    <div className="text-[10px] text-slate-500">kgpone_offline.db • {systemDiagnostics.local_database?.active_documents || 0} active local documents</div>
+                  </div>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400">
+                    {systemDiagnostics.local_database?.status}
+                  </span>
+                </div>
+
+                {/* Local Ollama */}
+                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-between bg-white dark:bg-slate-900 shadow-xs">
+                  <div>
+                    <div className="text-[12px] font-semibold text-slate-800 dark:text-slate-200">Local AI Daemon (Ollama)</div>
+                    <div className="text-[10px] text-slate-500">
+                      {systemDiagnostics.local_llm_ollama?.models?.length > 0 
+                        ? `Available Models: ${systemDiagnostics.local_llm_ollama.models.join(', ')}` 
+                        : 'Host: 127.0.0.1:11434'}
+                    </div>
+                    {systemDiagnostics.local_llm_ollama?.action && (
+                      <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">{systemDiagnostics.local_llm_ollama.action}</div>
+                    )}
+                  </div>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                    systemDiagnostics.local_llm_ollama?.status === 'ready' 
+                      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400' 
+                      : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400'
+                  }`}>
+                    {systemDiagnostics.local_llm_ollama?.status}
+                  </span>
+                </div>
+
+                {/* Local Qdrant */}
+                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-between bg-white dark:bg-slate-900 shadow-xs">
+                  <div>
+                    <div className="text-[12px] font-semibold text-slate-800 dark:text-slate-200">Local Vector Store</div>
+                    <div className="text-[10px] text-slate-500">{systemDiagnostics.local_vector_store?.description}</div>
+                  </div>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400">
+                    {systemDiagnostics.local_vector_store?.status}
+                  </span>
+                </div>
+
+                {/* Dropzone Watcher */}
+                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-between bg-white dark:bg-slate-900 shadow-xs">
+                  <div>
+                    <div className="text-[12px] font-semibold text-slate-800 dark:text-slate-200">Dropzone Ingestion Supervisor</div>
+                    <div className="text-[10px] text-slate-500">
+                      Directory: ~/KgpOne_Dropzone ({systemDiagnostics.dropzone_watcher?.pdf_files_in_folder || 0} PDFs in folder)
+                    </div>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                    systemDiagnostics.dropzone_watcher?.status === 'running' 
+                      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400' 
+                      : 'bg-red-100 text-red-700'
+                  }`}>
+                    {systemDiagnostics.dropzone_watcher?.status}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-6 text-slate-400 text-xs">
+                Could not retrieve diagnostics data.
+              </div>
             )}
           </div>
         </DialogContent>

@@ -1,7 +1,9 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
-from src.infrastructure.database import get_db
+from src.infrastructure.database import get_db, get_local_db
+
+# ... (keep existing imports)
 from src.schemas.document_schema import (
     DocumentCreate, DocumentRead, DocumentUpdate,
     PresignedUrlRequest, PresignedUrlResponse
@@ -15,6 +17,10 @@ from src.schemas.response_schema import StandardResponse
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
 def get_document_service(db: Session = Depends(get_db)) -> DocumentService:
+    repo = DocumentRepository(db)
+    return DocumentService(repo)
+
+def get_local_document_service(db: Session = Depends(get_local_db)) -> DocumentService:
     repo = DocumentRepository(db)
     return DocumentService(repo)
 
@@ -40,7 +46,7 @@ def watcher_health():
     return StandardResponse(status="success", message="Watcher health retrieved", data=data)
 
 @router.get("/local", response_model=StandardResponse[list[DocumentRead]])
-def get_local_documents(service: DocumentService = Depends(get_document_service), user: User = Depends(get_current_user)):
+def get_local_documents(service: DocumentService = Depends(get_local_document_service), user: User = Depends(get_current_user)):
     data = service.get_local_documents()
     return StandardResponse(status="success", message="Local documents retrieved successfully", data=data)
 

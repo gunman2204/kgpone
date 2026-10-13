@@ -21,15 +21,13 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # Import all models at startup so SQLAlchemy can resolve all relationship strings
-from src.infrastructure.database import SessionLocal  # noqa: F401 — registers Base
+from src.infrastructure.database import LocalSessionLocal  # noqa: F401 — registers Base
 from src.models.document_model import Document, DocFormat, ProcessingStatus  # noqa: F401
 from src.models.academic_model import CourseOffering, Course, Department, SemesterType  # noqa: F401
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("dropzone_watcher")
+# logging handled globally by src.utils.logger
+from src.utils.logger import setup_logger
+logger = setup_logger("dropzone_watcher")
 
 DROPZONE_DIR = os.path.expanduser("~/KgpOne_Dropzone")
 SUPPORTED_EXTENSIONS = {".pdf"}
@@ -120,7 +118,7 @@ def ingest_file(filepath: str) -> None:
     Core ingestion logic — idempotent.
     Returns silently if the file is already processed/processing.
     """
-    from src.infrastructure.database import SessionLocal
+    from src.infrastructure.database import LocalSessionLocal
     from src.models.document_model import Document, DocFormat, ProcessingStatus
     from src.workers.tasks.ingestion_tasks import process_document_task
 
@@ -136,12 +134,15 @@ def ingest_file(filepath: str) -> None:
         logger.warning(f"[Skip] File disappeared before ingestion: {filename}")
         return
 
-    db = SessionLocal()
+    db = LocalSessionLocal()
     try:
         # ── Step 1: path-based deduplication ──────────────────────────
         existing_by_path = (
             db.query(Document)
-            .filter(Document.s3_key == filepath)
+            .filter(
+                Document.s3_key == filepath,
+                Document.is_deleted == False
+            )
             .order_by(Document.status.desc())   # COMPLETED before PENDING
             .all()
         )
@@ -176,6 +177,7 @@ def ingest_file(filepath: str) -> None:
                 .filter(
                     Document.file_hash == file_hash,
                     Document.status == ProcessingStatus.COMPLETED,
+                    Document.is_deleted == False
                 )
                 .first()
             )
@@ -232,11 +234,11 @@ def handle_deletion(filepath: str) -> None:
     When a file is deleted from the Dropzone, mark its DB record as deleted
     and clear its hash so the same content can be re-imported later.
     """
-    from src.infrastructure.database import SessionLocal
+    from src.infrastructure.database import LocalSessionLocal
     from src.models.document_model import Document
 
     filename = os.path.basename(filepath)
-    db = SessionLocal()
+    db = LocalSessionLocal()
     try:
         docs = db.query(Document).filter(Document.s3_key == filepath).all()
         if not docs:
@@ -261,17 +263,18 @@ def startup_scan() -> None:
     On startup, scan the Dropzone directory and ingest any PDF files that
     are not yet COMPLETED or PROCESSING in the database.
     """
-    from src.infrastructure.database import SessionLocal
+    from src.infrastructure.database import LocalSessionLocal
     from src.models.document_model import Document, ProcessingStatus
 
     logger.info(f"[Startup Scan] Scanning {DROPZONE_DIR} for unprocessed files …")
-    db = SessionLocal()
+    db = LocalSessionLocal()
     try:
         completed_paths = {
             d.s3_key
             for d in db.query(Document)
             .filter(
-                Document.status.in_([ProcessingStatus.COMPLETED, ProcessingStatus.PROCESSING])
+                Document.status.in_([ProcessingStatus.COMPLETED, ProcessingStatus.PROCESSING]),
+                Document.is_deleted == False
             )
             .all()
         }
@@ -319,7 +322,7 @@ class DropzoneHandler(FileSystemEventHandler):
 
 def reconciliation_loop(stop_event):
     """Re-queues PENDING documents whose files still exist on disk."""
-    from src.infrastructure.database import SessionLocal
+    from src.infrastructure.database import LocalSessionLocal
     from src.models.document_model import Document, ProcessingStatus
     import threading
     from src.workers.tasks.ingestion_tasks import run_document_ingestion
@@ -334,7 +337,7 @@ def reconciliation_loop(stop_event):
         if stop_event.is_set():
             break
 
-        db = SessionLocal()
+        db = LocalSessionLocal()
         try:
             stuck = (
                 db.query(Document)

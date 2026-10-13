@@ -27,13 +27,15 @@ class UserService:
     def get_password_hash(self, password: str) -> str:
         return password_hash.hash(password)
 
-    def create_access_token(self, subject: str | Any, expires_delta: timedelta | None = None) -> str:
+    def create_access_token(self, subject: str | Any, expires_delta: timedelta | None = None, extra_claims: dict = None) -> str:
         if expires_delta:
             expire = datetime.now(timezone.utc) + expires_delta
         else:
             expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         
         to_encode = {"exp": expire, "sub": str(subject), "type": "access"}
+        if extra_claims:
+            to_encode.update(extra_claims)
         encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
         return encoded_jwt
 
@@ -60,13 +62,17 @@ class UserService:
             raise HTTPException(status_code=401, detail="User not found or inactive")
 
         new_access_token = self.create_access_token(subject=user_id)
-        # We can issue a new refresh token or keep the old one depending on policy.
-        # Let's issue a new one for rotating refresh tokens.
         new_refresh_token = self.create_refresh_token(subject=user_id)
+        offline_token = self.create_access_token(
+            subject=user_id,
+            expires_delta=timedelta(days=30),
+            extra_claims={"mode": "offline"}
+        )
 
         return TokenResponse(
             access_token=new_access_token,
             refresh_token=new_refresh_token,
+            offline_token=offline_token,
             token_type="bearer"
         )
 
@@ -100,7 +106,9 @@ class UserService:
         
         # Create a 30-day offline token for desktop-app mode fallback
         offline_token = self.create_access_token(
-            subject=str(user.id), expires_delta=timedelta(days=30)
+            subject=str(user.id), 
+            expires_delta=timedelta(days=30),
+            extra_claims={"mode": "offline"}
         )
 
         return TokenResponse(

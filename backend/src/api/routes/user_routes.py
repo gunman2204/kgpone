@@ -62,7 +62,24 @@ def refresh_token(request: RefreshRequest, service: UserService = Depends(get_us
 
 @router.get("/me", response_model=StandardResponse[UserRead])
 def get_me(current_user: User = Depends(get_current_user)):
-    return StandardResponse(status="success", message="Profile retrieved successfully", data=current_user)
+    # Build UserRead explicitly to handle both real DB users and offline stubs
+    try:
+        data = UserRead.model_validate(current_user)
+    except Exception:
+        from datetime import datetime, timezone
+        from uuid import uuid4
+        now = datetime.now(timezone.utc)
+        data = UserRead(
+            id=getattr(current_user, 'id', uuid4()),
+            email=getattr(current_user, 'email', 'offline@offline.local'),
+            full_name=getattr(current_user, 'full_name', 'Offline User'),
+            role=getattr(current_user, 'role', UserRole.STUDENT),
+            is_active=True,
+            is_verified=True,
+            created_at=now,
+            updated_at=now,
+        )
+    return StandardResponse(status="success", message="Profile retrieved successfully", data=data)
 
 @router.post("/logout", response_model=StandardResponse[None])
 def logout_user(response: Response):

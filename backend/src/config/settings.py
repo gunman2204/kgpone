@@ -38,14 +38,9 @@ class Settings:
         CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
 
     # AI Providers Configuration
-    if OFFLINE_MODE:
-        AI_PROVIDER = "ollama"
-        AI_MODEL = "phi3:mini"
-        EMBEDDING_PROVIDER = "infinity"
-    else:
-        AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").lower()
-        AI_MODEL = os.getenv("AI_MODEL", "")
-        EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "gemini").lower()
+    AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").lower()
+    AI_MODEL = os.getenv("AI_MODEL", "")
+    EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "gemini").lower()
         
     AI_API_KEY = os.getenv("AI_API_KEY", "")
     

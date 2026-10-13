@@ -15,6 +15,13 @@ class AnswerService(BaseAnswerGenerator):
             logger.error(f"Failed to configure LLM in AnswerService: {e}. Enabling fallback.")
             self.llm = None
 
+        try:
+            self.offline_llm = self.factory.get_offline_llm()
+            logger.info("Configured offline Ollama LLM successfully.")
+        except Exception as e:
+            logger.warning(f"Failed to configure offline Ollama LLM: {e}. Will use grounded synthesizer.")
+            self.offline_llm = None
+
         self.prompt_template = ChatPromptTemplate.from_messages([
             ("system", """You are the core intelligence of "KnowledgeOS", an advanced academic AI tutor designed for university students. 
 Students use you to gain deep conceptual understanding, study for exams, and clarify complex academic topics.
@@ -221,16 +228,21 @@ If they ask for code, provide it. Use markdown formatting beautifully."""),
         ranked_chunks: list[dict[str, Any]], 
         use_citations: bool = True,
         chat_history: list[dict] = None,
-        user_memories: list[str] = None
+        user_memories: list[str] = None,
+        is_offline: bool = False
     ):
         """
         Generates a streaming academic response.
+        Routes to local Ollama if offline, otherwise primary cloud LLM,
+        with instantaneous fallback to local grounded synthesis.
         """
-        top_score = ranked_chunks[0].get("final_score", ranked_chunks[0].get("score", 0.0)) if ranked_chunks else 0.0
-        # Removing the 0.05 threshold so meta-queries can be handled by the LLM
         is_irrelevant = not ranked_chunks
 
         if is_irrelevant:
+            if is_offline:
+                yield "I couldn't find matching sections in your selected local library materials. Please ensure the document is selected in the local library panel.\n\n"
+                return
+
             yield "*No local course materials found. Searching the web...*\n\n"
             try:
                 from ddgs import DDGS
@@ -249,7 +261,12 @@ If they ask for code, provide it. Use markdown formatting beautifully."""),
         else:
             context_str = self._build_context_string(ranked_chunks, use_citations)
 
-        if not self.llm:
+        # Select LLM engine
+        active_llm = self.offline_llm if is_offline else self.llm
+        if is_offline and not active_llm:
+            active_llm = self.llm # try primary if offline_llm was None
+
+        if not active_llm:
             yield self._generate_offline_grounded_answer(query, ranked_chunks, [])
             return
 
@@ -276,9 +293,9 @@ If they ask for code, provide it. Use markdown formatting beautifully."""),
                         history_msgs.append(AIMessage(content=msg["content"]))
                 messages = [messages[0]] + history_msgs + messages[1:]
             
-            # Inject image URLs into the user message for Vision support (Only for non-Groq providers since Groq decommissioned vision)
+            # Inject image URLs into the user message for Vision support (only when online)
             from src.config.settings import Settings
-            if Settings.AI_PROVIDER != "groq":
+            if not is_offline and Settings.AI_PROVIDER != "groq":
                 image_urls = []
                 if not is_irrelevant:
                     for c in ranked_chunks:
@@ -293,37 +310,36 @@ If they ask for code, provide it. Use markdown formatting beautifully."""),
                         content.append({"type": "image_url", "image_url": {"url": url}})
                     user_msg.content = content
 
-            async for chunk in self.llm.astream(messages):
+            async for chunk in active_llm.astream(messages):
                 if isinstance(chunk.content, str):
                     yield chunk.content
                 elif isinstance(chunk.content, list):
-                    # Gemini streams sometimes return a list of parts
                     text_parts = [c.get("text", "") if isinstance(c, dict) else str(c) for c in chunk.content]
                     yield "".join(text_parts)
                 else:
                     yield str(chunk.content)
         except Exception as e:
             logger.error(f"LLM streaming failed: {e}")
-            yield "\n\n*(Network/API Error. Falling back to offline generation)*\n\n"
-            # Get citations if available
+            if is_offline:
+                yield "\n\n*(Local LLM offline or unreachable. Generating grounded answer from local notes:)*\n\n"
+            else:
+                yield "\n\n*(Network/API Error. Falling back to offline grounded generation)*\n\n"
             citations = []
             if use_citations:
                 try:
                     from src.services.rag.citation_service import CitationService
                     citations = CitationService().format_citations(ranked_chunks)
-                except:
+                except Exception:
                     pass
             yield self._generate_offline_grounded_answer(query, ranked_chunks, citations)
+
     def _generate_offline_grounded_answer(self, query: str, ranked_chunks: list[dict[str, Any]], citations: list[dict[str, Any]]) -> str:
         """
-        Offline fallback matching algorithm. Synthesizes a grounded answer from the chunk payloads locally.
+        Synthesizes a grounded answer from chunk payloads locally without requiring an LLM.
         """
         answer_parts = []
-        
-        # Convert Pydantic models to dicts if needed
         safe_citations = [c.model_dump() if hasattr(c, "model_dump") else c for c in citations]
         
-        # Check if there is prerequisite content
         prereq_citations = [c for c in safe_citations if c.get("is_prerequisite")]
         active_citations = [c for c in safe_citations if not c.get("is_prerequisite")]
 
@@ -332,23 +348,33 @@ If they ask for code, provide it. Use markdown formatting beautifully."""),
             concept = p_cit.get("prerequisite_concept", "foundational concept")
             course = p_cit.get("course_code", "previous course")
             answer_parts.append(
-                f"**[Curriculum Time Travel Alert]** I noticed your query requires a foundational concept **{concept}** "
-                f"from your prerequisite course **{course}** (which you completed in a previous semester). "
-                f"Here is what the records show:\n\n"
+                f"**[Prerequisite Concept Reference]** Foundational concept **{concept}** "
+                f"from course **{course}**:\n\n"
             )
-            # Add snippet from prereq
             snippet = p_cit.get("text_snippet", "").replace("...", "")
             answer_parts.append(f"> *{snippet}* [[{p_cit['citation_id']}](#{p_cit['citation_id']})]\n\n")
 
-        # Active course context
         if active_citations:
-            a_cit = active_citations[0]
-            answer_parts.append(f"Regarding the main course query in **{a_cit['course_code']}**:\n\n")
-            for c in active_citations[:2]:
+            first_c = active_citations[0]
+            header = f"in **{first_c['course_code']}**" if first_c.get("course_code") else f"from **{first_c.get('source_title', 'Document')}**"
+            answer_parts.append(f"### Relevant Insights {header}:\n\n")
+            for c in active_citations[:3]:
                 snippet = c.get("text_snippet", "").replace("...", "")
-                answer_parts.append(f"- **From {c['source_title']} (Section: {c['section']}):** {snippet} [[{c['citation_id']}](#{c['citation_id']})]\n")
+                title = c.get("source_title", "Document")
+                sec = f" (Section: {c['section']})" if c.get("section") else ""
+                answer_parts.append(f"- **From {title}{sec}:** {snippet} [[{c['citation_id']}](#{c['citation_id']})]\n\n")
+        elif ranked_chunks:
+            answer_parts.append("### Relevant Information from Uploaded Materials:\n\n")
+            for idx, ch in enumerate(ranked_chunks[:3]):
+                p = ch.get("payload", {})
+                txt = p.get("formatted_text") or p.get("content") or p.get("text", "")
+                title = p.get("document_title", p.get("title", "Document"))
+                page = p.get("page_number", "")
+                page_str = f", Page {page}" if page else ""
+                cit_id = f"CIT-{idx + 1}"
+                answer_parts.append(f"- **From {title}{page_str}:** {txt[:280]}... [[{cit_id}](#{cit_id})]\n\n")
         else:
-            answer_parts.append("No active course notes match the details, but you can learn more using the prerequisite references.")
+            answer_parts.append("No local notes or document chunks were found matching your query.")
 
-        answer_parts.append("\n*(Note: Grounded local synthesis mode - Offline fallback active)*")
+        answer_parts.append("\n*(Note: Grounded local synthesis mode - Offline active)*")
         return "".join(answer_parts)

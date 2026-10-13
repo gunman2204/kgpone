@@ -4,7 +4,7 @@ import tempfile
 import logging
 from celery import shared_task
 from sqlalchemy.orm import Session
-from src.infrastructure.database import SessionLocal
+from src.infrastructure.database import SessionLocal, LocalSessionLocal
 from src.repositories.postgres.document_repository import DocumentRepository
 from src.repositories.s3.storage_repository import S3Storage
 from src.models.document_model import ProcessingStatus, Document
@@ -28,6 +28,7 @@ def run_document_ingestion(document_id: str, old_version: int = None):
     """
     logger.info(f"Starting ingestion process for document {document_id}")
     db: Session = SessionLocal()
+    is_local_db = False
     try:
         import uuid
         # 1. Fetch document metadata
@@ -35,6 +36,14 @@ def run_document_ingestion(document_id: str, old_version: int = None):
         # Ensure we pass a UUID object, not a string, as SQLite's SQLAlchemy dialect expects an object to call .hex on
         doc_uuid = uuid.UUID(document_id) if isinstance(document_id, str) else document_id
         doc = repo.get_document(doc_uuid)
+        
+        if not doc:
+            db.close()
+            db = LocalSessionLocal()
+            repo = DocumentRepository(db)
+            is_local_db = True
+            doc = repo.get_document(doc_uuid)
+            
         if not doc:
             logger.error(f"Document {document_id} not found in DB.")
             return
@@ -78,7 +87,7 @@ def run_document_ingestion(document_id: str, old_version: int = None):
         )
         chunker = DOMChunker()
         embedder = LLMEmbedder()
-        vector_store = QdrantRepository()
+        vector_store = QdrantRepository(is_local=is_local_file)
         
         entity_extractor = GLiNERExtractor()
         entity_resolver = EntityResolver()

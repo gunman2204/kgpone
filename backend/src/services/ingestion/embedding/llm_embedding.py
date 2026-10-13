@@ -61,8 +61,9 @@ class LLMEmbedder(BaseEmbedder):
                             logger.error(f"Failed to embed batch after {max_retries} attempts due to rate limit.")
                             raise
                     else:
-                        logger.error(f"Unexpected embedding error: {error_msg}")
-                        raise
+                        logger.warning(f"Unexpected embedding error ({error_msg}). Falling back to local offline embeddings.")
+                        self.use_fallback = True
+                        return await self.embed(chunks)
                         
             # Add a small delay between successful batches to prevent bursting
             if i + batch_size < len(chunks):
@@ -75,22 +76,15 @@ class LLMEmbedder(BaseEmbedder):
             vectors = await self.embed([query])
             return vectors[0]
 
-        max_retries = 5
-        retry_delay = 5
-        
-        for attempt in range(max_retries):
-            try:
-                query_embedding = await self.embedder.aembed_query(query)
-                return query_embedding
-            except Exception as e:
-                error_msg = str(e)
-                if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "Quota exceeded" in error_msg:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Rate limit hit during query embedding. Sleeping for {retry_delay}s... (Attempt {attempt + 1}/{max_retries})")
-                        await asyncio.sleep(retry_delay)
-                        retry_delay += 5
-                    else:
-                        logger.error(f"Failed to embed query after {max_retries} attempts due to rate limit.")
-                        raise
-                else:
-                    raise
+        try:
+            query_embedding = await self.embedder.aembed_query(query)
+            return query_embedding
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                logger.warning(f"Rate limit hit during query embedding ({error_msg}). Falling back to local offline embeddings.")
+            else:
+                logger.warning(f"Query embedding failed ({error_msg}). Falling back to local offline embeddings.")
+            self.use_fallback = True
+            vectors = await self.embed([query])
+            return vectors[0]

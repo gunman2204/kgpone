@@ -62,16 +62,28 @@ class LLMFactory(ILLMFactory):
 
         elif provider == "ollama":
             try:
-                # Older langchain versions use langchain_community
-                from langchain_community.chat_models import ChatOllama
-            except ImportError:
-                # Newer versions use langchain_ollama
                 from langchain_ollama import ChatOllama
-            return ChatOllama(model=model or "phi3:mini", **kwargs)
+                return ChatOllama(model=model or "phi3:mini", base_url="http://127.0.0.1:11434", timeout=15.0, **kwargs)
+            except ImportError:
+                from langchain_community.chat_models import ChatOllama
+                return ChatOllama(model=model or "phi3:mini", base_url="http://127.0.0.1:11434", timeout=15.0, **kwargs)
 
         else:
             logger.error(f"Unsupported AI provider: {provider}")
             raise ValueError(f"Unsupported AI provider: {provider}")
+
+    def get_offline_llm(self, model_name: str | None = None, **kwargs) -> BaseChatModel:
+        """Returns local Ollama LLM optimized for fast CPU inference."""
+        model = model_name or "phi3:mini"
+        params = {"num_predict": 350, "temperature": 0.2}
+        params.update(kwargs)
+        try:
+            from langchain_ollama import ChatOllama
+            return ChatOllama(model=model, base_url="http://127.0.0.1:11434", timeout=30.0, **params)
+        except ImportError:
+            from langchain_community.chat_models import ChatOllama
+            return ChatOllama(model=model, base_url="http://127.0.0.1:11434", timeout=30.0, **params)
+
 
 
     def get_embeddings(self, model_name: str | None = None, **kwargs) -> Embeddings:

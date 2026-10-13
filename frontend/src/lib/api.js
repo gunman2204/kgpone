@@ -5,9 +5,16 @@ const api = axios.create({
 });
 
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('access_token');
+  const isOffline = !navigator.onLine || localStorage.getItem('kgpone_offline_mode') === 'true';
+  const token = isOffline 
+    ? (localStorage.getItem('offline_access_token') || localStorage.getItem('access_token')) 
+    : localStorage.getItem('access_token');
+    
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
+  }
+  if (isOffline) {
+    config.headers['X-Offline-Mode'] = 'true';
   }
   return config;
 }, (error) => {
@@ -21,15 +28,15 @@ api.interceptors.response.use(
     if (error.response?.status === 401 && !originalRequest._retry && originalRequest.url !== '/api/v1/users/login') {
       originalRequest._retry = true;
       
-      // Offline fallback: if no internet, use the 30-day offline token instead of trying to refresh
-      if (!navigator.onLine) {
+      const isOffline = !navigator.onLine || localStorage.getItem('kgpone_offline_mode') === 'true';
+      
+      // Offline fallback: if offline or no internet, use 30-day offline token instead of calling refresh
+      if (isOffline) {
         const offlineToken = localStorage.getItem('offline_access_token');
-        if (offlineToken) {
+        if (offlineToken && originalRequest.headers.Authorization !== `Bearer ${offlineToken}`) {
           originalRequest.headers.Authorization = `Bearer ${offlineToken}`;
           return api(originalRequest);
         } else {
-          // No offline token, cannot proceed
-          window.dispatchEvent(new CustomEvent('offline-auth-expired'));
           return Promise.reject(error);
         }
       }
@@ -40,14 +47,16 @@ api.interceptors.response.use(
         try {
           const res = await axios.post(`${api.defaults.baseURL}/api/v1/users/refresh`, {
             refresh_token: refreshToken
-          });
+          }, { timeout: 5000 });
           
           if (res.data.status === 'success') {
             const newAccessToken = res.data.data.access_token;
             const newRefreshToken = res.data.data.refresh_token;
+            const newOfflineToken = res.data.data.offline_token;
             
             localStorage.setItem('access_token', newAccessToken);
             if (newRefreshToken) localStorage.setItem('refresh_token', newRefreshToken);
+            if (newOfflineToken) localStorage.setItem('offline_access_token', newOfflineToken);
             
             originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
             return api(originalRequest);

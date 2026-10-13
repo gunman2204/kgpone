@@ -47,6 +47,7 @@ dependencies = [
     "en-core-web-sm",
     "watchdog>=6.0.0",
     "aiosqlite>=0.22.1",
+    "langchain-ollama>=1.1.0",
 ]
 
 [tool.pyright]

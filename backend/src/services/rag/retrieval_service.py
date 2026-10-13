@@ -24,12 +24,14 @@ class RetrievalService(BaseRetriever):
     def __init__(
         self,
         embedder: BaseEmbedder,
-        vector_store: IVectorRepo,
+        cloud_vector_store: IVectorRepo,
+        local_vector_store: IVectorRepo,
         db=None,
         collection_name: str = "documents",
     ):
         self.embedder = embedder
-        self.vector_store = vector_store
+        self.cloud_vector_store = cloud_vector_store
+        self.local_vector_store = local_vector_store
         self.db = db
         self.collection_name = collection_name
         self.graph_repo = Neo4jRepo()
@@ -101,20 +103,36 @@ class RetrievalService(BaseRetriever):
                 filters["course_code"] = plan.course_code
             if getattr(plan, "course_offering_id", None):
                 filters["course_offering_id"] = plan.course_offering_id
+            vector_store = self.cloud_vector_store
             if document_ids:
                 filters["document_id"] = document_ids # Qdrant supports matching against lists
+                vector_store = self.local_vector_store
 
             # For figure searches fetch more candidates so we don't miss image chunks
             is_figure_query = plan.intent == "figure_search"
             limit = 50 if is_figure_query else 30
 
-            search_results = await asyncio.to_thread(
-                self.vector_store.search,
-                collection_name=self.collection_name,
-                query_vector=query_vector,
-                limit=limit,
-                filters=filters if filters else None,
-            )
+            try:
+                search_results = await asyncio.to_thread(
+                    vector_store.search,
+                    collection_name=self.collection_name,
+                    query_vector=query_vector,
+                    limit=limit,
+                    filters=filters if filters else None,
+                )
+            except Exception as search_err:
+                if vector_store != self.local_vector_store:
+                    logger.warning(f"Vector search against cloud store failed ({search_err}). Falling back to local vector store.")
+                    vector_store = self.local_vector_store
+                    search_results = await asyncio.to_thread(
+                        vector_store.search,
+                        collection_name=self.collection_name,
+                        query_vector=query_vector,
+                        limit=limit,
+                        filters=filters if filters else None,
+                    )
+                else:
+                    raise search_err
 
             for r in search_results:
                 payload = r.payload or {}

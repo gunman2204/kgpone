@@ -18,7 +18,7 @@ from src.services.rag.answer_service import AnswerService
 from src.services.rag.semantic_cache_service import SemanticCacheService
 from src.services.ingestion.embedding.llm_embedding import LLMEmbedder
 from src.repositories.qdrant.vector_repository import QdrantRepository
-from src.infrastructure.database import get_db
+from src.infrastructure.database import get_db, LocalSessionLocal
 from sqlalchemy.orm import Session
 from src.infrastructure.llm_factory import LLMFactory
 from src.api.middleware.auth_middleware import get_current_user
@@ -31,8 +31,9 @@ router = APIRouter(prefix="/query", tags=["Query & RAG"])
 def get_rag_services(db: Session = Depends(get_db)):
     planner = NLPPlannerService()
     embedder = LLMEmbedder()
-    vector_repo = QdrantRepository()
-    retriever = RetrievalService(embedder=embedder, vector_store=vector_repo, db=db)
+    cloud_repo = QdrantRepository(is_local=False)
+    local_repo = QdrantRepository(is_local=True)
+    retriever = RetrievalService(embedder=embedder, cloud_vector_store=cloud_repo, local_vector_store=local_repo, db=db)
     reranker = CrossEncoderRerankService()
     citation_formatter = CitationService()
     answer_generator = AnswerService()
@@ -154,60 +155,86 @@ async def ask_question(req: QueryRequest, services: dict = Depends(get_rag_servi
 @router.post("/ask_stream")
 async def ask_question_stream(
     req: QueryRequest, 
+    request: Request,
     services: dict = Depends(get_rag_services),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user)
 ):
-    """SSE endpoint for streaming the RAG answer.
-
-    Supports two modes controlled by `analysis_mode` in the request body:
-      - 'basic'    : fast NLP planner (~3ms) → deterministic retrieval pipeline.
-      - 'advanced' : tool-calling agent → autonomously fetches context via tools
-                     before handing off to the generator.
-
-    Also supports BYOK via `byok_provider`, `byok_api_key`, `byok_model` fields.
-    BYOK keys are used only for this request and are never stored.
-    """
+    """SSE endpoint for streaming the RAG answer with zero offline hangs."""
     query = req.query
     course_code = req.course_code
     course_offering_id = req.course_offering_id
     t0 = time.time()
     
-    chat_repo = ChatRepository(db)
+    is_offline = (
+        bool(req.document_ids) 
+        or req.course_code == "local" 
+        or getattr(user, "email", "") == "offline@local"
+        or request.headers.get("x-offline-mode") == "true"
+    )
+
+    # Database selection with zero-delay offline routing
+    active_db = LocalSessionLocal() if is_offline else db
+    chat_repo = ChatRepository(active_db)
     
     chat_history_dicts = []
     user_memories_strs = []
     
-    # Load user memories
-    memories = chat_repo.get_user_memories(user.id)
-    user_memories_strs = [m.fact for m in memories]
+    # Load user memories with resilient fallback to local SQLite
+    try:
+        memories = chat_repo.get_user_memories(user.id)
+        user_memories_strs = [m.fact for m in memories]
+    except Exception as e:
+        logger.warning(f"Failed to load memories from primary DB: {e}. Falling back to SQLite.")
+        active_db = LocalSessionLocal()
+        chat_repo = ChatRepository(active_db)
+        try:
+            memories = chat_repo.get_user_memories(user.id)
+            user_memories_strs = [m.fact for m in memories]
+        except Exception:
+            user_memories_strs = []
     
     # ── Handle Conversation State ──
-    if req.conversation_id:
-        conversation = chat_repo.get_conversation(req.conversation_id, load_messages=True)
-        if not conversation or conversation.user_id != user.id:
-            req.conversation_id = None # Fallback to new if invalid
-        else:
-            if conversation.summary:
-                summary_text = f"Previous Conversation Summary: {conversation.summary}"
-                if conversation.keywords:
-                    summary_text += f"\nKeywords: {conversation.keywords}"
-                chat_history_dicts.append({"role": "system", "content": summary_text})
-                
-            # Only keep the last 5 messages to avoid huge context sizes
-            for msg in conversation.messages[-5:]:
-                chat_history_dicts.append({"role": msg.role.value, "content": msg.content})
-    
-    if not req.conversation_id:
-        # Title can be generated later async, just use query snippet for now
-        conversation = chat_repo.create_conversation(user.id, title=req.query[:50] + "..." if len(req.query) > 50 else req.query)
-        req.conversation_id = conversation.id
+    try:
+        if req.conversation_id:
+            conversation = chat_repo.get_conversation(req.conversation_id, load_messages=True)
+            if not conversation or conversation.user_id != user.id:
+                req.conversation_id = None
+            else:
+                if conversation.summary:
+                    summary_text = f"Previous Conversation Summary: {conversation.summary}"
+                    if conversation.keywords:
+                        summary_text += f"\nKeywords: {conversation.keywords}"
+                    chat_history_dicts.append({"role": "system", "content": summary_text})
+                    
+                for msg in conversation.messages[-5:]:
+                    chat_history_dicts.append({"role": msg.role.value, "content": msg.content})
         
-    # Add user message
-    chat_repo.add_message(req.conversation_id, MessageRole.USER, query)
+        if not req.conversation_id:
+            title = req.query[:50] + "..." if len(req.query) > 50 else req.query
+            conversation = chat_repo.create_conversation(user.id, title=title)
+            req.conversation_id = conversation.id
+            
+        chat_repo.add_message(req.conversation_id, MessageRole.USER, query)
+    except Exception as conv_err:
+        logger.warning(f"Failed to record conversation in primary DB: {conv_err}. Retrying with local SQLite.")
+        active_db = LocalSessionLocal()
+        chat_repo = ChatRepository(active_db)
+        try:
+            title = req.query[:50] + "..." if len(req.query) > 50 else req.query
+            conversation = chat_repo.create_conversation(user.id, title=title)
+            req.conversation_id = conversation.id
+            chat_repo.add_message(req.conversation_id, MessageRole.USER, query)
+        except Exception:
+            pass
 
-    # ── Planner: Basic (NLP) or Advanced (Tool-Calling Agent) ──
-    if req.analysis_mode == "advanced":
+    # ── Planner: Basic, Advanced, or Fast Offline Routing ──
+    from src.schemas.query_schema import QueryPlan
+    if is_offline:
+        # Fast local path: query targets dropzone documents, zero LLM calls or cloud dependencies
+        plan = QueryPlan(intent="document_qa", backends_needed=["qdrant"])
+        logger.info(f"[Mode] Fast Offline Local Document QA (Target docs: {len(req.document_ids) if req.document_ids else 'all'})")
+    elif req.analysis_mode == "advanced":
         from src.services.rag.agentic_planner_service import AgenticPlannerService
         llm_factory = services["llm_factory"]
         agent_llm = llm_factory.get_llm_for_request(
@@ -216,17 +243,16 @@ async def ask_question_stream(
             byok_model=req.byok_model,
         )
         planner = AgenticPlannerService(llm=agent_llm)
+        plan = await planner.detect_intent(query, course_code, course_offering_id)
         logger.info(f"[Mode] Advanced Agent (BYOK={bool(req.byok_api_key)})")
-    else:
-        planner = services["planner"]
-        logger.info("[Mode] Basic NLP planner")
-
-    if req.analysis_mode == "general":
-        from src.schemas.query_schema import QueryPlan
+    elif req.analysis_mode == "general":
         plan = QueryPlan(intent="general_qa", backends_needed=[])
         logger.info("[Mode] General bypass requested")
     else:
+        planner = services["planner"]
         plan = await planner.detect_intent(query, course_code, course_offering_id)
+        logger.info("[Mode] Basic NLP planner")
+
     t1 = time.time()
     logger.info(f"[PERF] Planner took: {t1 - t0:.4f}s")
 
@@ -245,38 +271,40 @@ async def ask_question_stream(
                 "backends_used": [],
                 "conversation_id": str(req.conversation_id)
             }
-            chat_repo.add_message(req.conversation_id, MessageRole.ASSISTANT, full_response, metadata)
+            try:
+                chat_repo.add_message(req.conversation_id, MessageRole.ASSISTANT, full_response, metadata)
+            except Exception:
+                pass
             
-            import asyncio
-            from src.workers.tasks.memory_tasks import extract_user_memory_task
-            asyncio.create_task(extract_user_memory_task(req.conversation_id))
+            if not is_offline:
+                import asyncio
+                from src.workers.tasks.memory_tasks import extract_user_memory_task
+                asyncio.create_task(extract_user_memory_task(req.conversation_id))
             
             yield f"data: {json.dumps(metadata)}\n\n"
         return StreamingResponse(general_event_generator(), media_type="text/event-stream")
 
-    # Agent pre-fetched chunks (only present in advanced mode)
     agent_chunks = getattr(plan, "_agent_chunks", [])
 
     context = await services["retriever"].retrieve_context(query, plan, document_ids=req.document_ids)
     t2 = time.time()
     logger.info(f"[PERF] Retriever took: {t2 - t1:.4f}s")
 
-    # Merge agent tool results with retriever results (agent chunks get priority)
     if agent_chunks:
         context["retrieved_chunks"] = agent_chunks + context["retrieved_chunks"]
         logger.info(f"[Agent] Injected {len(agent_chunks)} pre-fetched tool chunks")
 
-    # Inject presigned image URLs into all figure chunks so the LLM context includes them
-    _inject_presigned_image_urls(context["retrieved_chunks"])
+    if not is_offline:
+        _inject_presigned_image_urls(context["retrieved_chunks"])
 
-    reranked_chunks = await services["reranker"].rerank_chunks(query, context["retrieved_chunks"], top_n=10)
+    top_n = 4 if is_offline else 10
+    reranked_chunks = await services["reranker"].rerank_chunks(query, context["retrieved_chunks"], top_n=top_n)
     t3 = time.time()
     logger.info(f"[PERF] Reranker took: {t3 - t2:.4f}s")
     
     citations = services["citation_formatter"].format_citations(reranked_chunks)
-    # Enrich figure citations with presigned GET URLs
-    _enrich_citations_with_image_urls(citations)
-    _enrich_citations_with_document_urls(citations)
+    _enrich_citations_with_image_urls(citations, is_offline=is_offline)
+    _enrich_citations_with_document_urls(citations, is_offline=is_offline)
     t4 = time.time()
     logger.info(f"[PERF] Citations took: {t4 - t3:.4f}s")
         
@@ -289,7 +317,7 @@ async def ask_question_stream(
             seen_docs.add(doc_id)
             sources.append({
                 "document_id": doc_id,
-                "title": payload.get("document_title", payload.get("title", "Unknown")),
+                "title": payload.get("document_title", payload.get("title", "Local Document")),
                 "course_code": payload.get("course_code", ""),
                 "doc_type": payload.get("document_type", "Notes"),
                 "s3_key": payload.get("s3_key", "")
@@ -300,18 +328,30 @@ async def ask_question_stream(
         t_gen_start = time.time()
         first_chunk = True
         full_response = ""
-        async for text_chunk in services["answer_generator"].generate_answer_stream(query, reranked_chunks, req.use_citations, chat_history=chat_history_dicts, user_memories=user_memories_strs):
-            full_response += text_chunk
-            if first_chunk:
-                t_first = time.time()
-                logger.info(f"[PERF] Generator TTFT (Time to First Token) took: {t_first - t_gen_start:.4f}s")
-                first_chunk = False
-            yield f"data: {json.dumps({'type': 'chunk', 'content': text_chunk})}\n\n"
+        try:
+            async for text_chunk in services["answer_generator"].generate_answer_stream(
+                query, 
+                reranked_chunks, 
+                req.use_citations, 
+                chat_history=chat_history_dicts, 
+                user_memories=user_memories_strs,
+                is_offline=is_offline
+            ):
+                full_response += text_chunk
+                if first_chunk:
+                    t_first = time.time()
+                    logger.info(f"[PERF] Generator TTFT (Time to First Token) took: {t_first - t_gen_start:.4f}s")
+                    first_chunk = False
+                yield f"data: {json.dumps({'type': 'chunk', 'content': text_chunk})}\n\n"
+        except Exception as stream_err:
+            logger.error(f"Stream generation error: {stream_err}")
+            err_msg = f"\n\n*(Error generating streamed answer: {str(stream_err)})*\n\n"
+            full_response += err_msg
+            yield f"data: {json.dumps({'type': 'chunk', 'content': err_msg})}\n\n"
             
         t_gen_end = time.time()
         logger.info(f"[PERF] Generator Total LLM Stream took: {t_gen_end - t_gen_start:.4f}s")
         
-        # Filter citations: Only include citations that the LLM actually emitted in the response
         active_citations = []
         used_doc_ids = set()
         
@@ -320,7 +360,6 @@ async def ask_question_stream(
         if req.use_citations:
             for cit in raw_citations:
                 cit_id = cit.get("citation_id")
-                # Check if e.g. "CIT-1" appears anywhere in the full text response
                 if cit_id and cit_id in full_response:
                     active_citations.append(cit)
                     doc_id = cit.get("document_id")
@@ -329,10 +368,8 @@ async def ask_question_stream(
         else:
             active_citations = raw_citations
             
-        # Filter sources based on used citations
-        active_sources = [s for s in sources if s.get("document_id") in used_doc_ids]
+        active_sources = [s for s in sources if s.get("document_id") in used_doc_ids] or sources[:2]
 
-        # Stream the final metadata block
         metadata = {
             "type": "metadata",
             "citations": active_citations,
@@ -343,24 +380,31 @@ async def ask_question_stream(
             "conversation_id": str(req.conversation_id)
         }
         
-        # Save assistant message to DB
-        chat_repo.add_message(req.conversation_id, MessageRole.ASSISTANT, full_response, metadata)
+        try:
+            chat_repo.add_message(req.conversation_id, MessageRole.ASSISTANT, full_response, metadata)
+        except Exception as save_err:
+            logger.warning(f"Could not persist assistant message: {save_err}")
         
-        # Trigger background memory extraction (fire and forget)
-        import asyncio
-        from src.workers.tasks.memory_tasks import extract_user_memory_task
-        asyncio.create_task(extract_user_memory_task(req.conversation_id))
+        if not is_offline:
+            try:
+                import asyncio
+                from src.workers.tasks.memory_tasks import extract_user_memory_task
+                asyncio.create_task(extract_user_memory_task(req.conversation_id))
+            except Exception:
+                pass
         
         yield f"data: {json.dumps(metadata)}\n\n"
         
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-def _enrich_citations_with_image_urls(citations: list) -> None:
+def _enrich_citations_with_image_urls(citations: list, is_offline: bool = False) -> None:
     """
     For figure citations that have an image_s3_key, generate a presigned GET URL
     (1-hour expiry) and attach it as image_url. Mutates citations in place.
     """
+    if is_offline:
+        return
     figure_cits = [c for c in citations if c.get("chunk_type") == "figure" and c.get("image_s3_key")]
     if not figure_cits:
         return
@@ -373,17 +417,18 @@ def _enrich_citations_with_image_urls(citations: list) -> None:
     except Exception as e:
         logger.warning(f"Failed to generate presigned image URLs: {e}")
 
-def _enrich_citations_with_document_urls(citations: list) -> None:
+def _enrich_citations_with_document_urls(citations: list, is_offline: bool = False) -> None:
     """
     For all citations that have a document_s3_key, generate a presigned GET URL
     (1-hour expiry) and attach it as document_download_url. Mutates citations in place.
     """
+    if is_offline:
+        return
     doc_cits = [c for c in citations if c.get("document_s3_key")]
     if not doc_cits:
         return
     try:
         s3 = S3Storage()
-        # Cache presigned URLs per document to avoid redundant S3 calls
         cache = {}
         for cit in doc_cits:
             key = cit["document_s3_key"]

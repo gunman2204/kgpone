@@ -6,7 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.infrastructure.database import Base
 from src.models.system_model import DeletionStatus
-from src.models.user_model import utcnow
+from src.models.common import utcnow
 
 class SemesterType(str, enum.Enum):
     AUTUMN = "AUTUMN"
